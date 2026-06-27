@@ -123,6 +123,44 @@ async def test_generate_post_failure_is_caught(monkeypatch, bot):
     bot.send_message.assert_not_called()
 
 
+async def test_preview_sends_to_chat_and_skips_persist(monkeypatch, bot):
+    entries = _entries(3)
+    monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
+    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1", "2"}))
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=1))
+    monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="<b>p</b>"))
+    mark = AsyncMock()
+    monkeypatch.setattr(pipeline, "mark_seen", mark)
+
+    result = await pipeline.run_once(bot, chat_id=42, persist=False)
+
+    assert result.status == "posted"
+    # Post goes to the given chat, not the channel...
+    bot.send_message.assert_awaited_once_with(
+        chat_id=42, text="<b>p</b>", disable_web_page_preview=False
+    )
+    # ...and nothing is written to the DB.
+    mark.assert_not_called()
+
+
+async def test_preview_publish_failure_skips_persist(monkeypatch, bot):
+    entries = _entries(2)
+    monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
+    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1"}))
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=0))
+    monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="post"))
+    bot.send_message.side_effect = RuntimeError("telegram down")
+    mark = AsyncMock()
+    monkeypatch.setattr(pipeline, "mark_seen", mark)
+
+    result = await pipeline.run_once(bot, chat_id=42, persist=False)
+
+    assert result.status == "error"
+    mark.assert_not_called()  # even on failure the preview leaves the DB untouched
+
+
 def test_runresult_str():
     assert str(pipeline.RunResult("posted", "title")) == "posted: title"
     assert str(pipeline.RunResult("no_new")) == "no_new"

@@ -21,7 +21,16 @@ class RunResult:
         return f"{self.status}: {self.detail}" if self.detail else self.status
 
 
-async def run_once(bot: Bot) -> RunResult:
+async def run_once(
+    bot: Bot, *, chat_id: int | str | None = None, persist: bool = True
+) -> RunResult:
+    """One pipeline run.
+
+    chat_id — where to send the post; defaults to the channel.
+    persist — whether to mark evaluated entries as seen. Set False for a
+        preview/dry-run so it stays repeatable and touches nothing in the DB.
+    """
+    target = chat_id if chat_id is not None else settings.channel_id
     url = await get_rss_url()
     if not url:
         log.info("No RSS url configured")
@@ -43,15 +52,15 @@ async def run_once(bot: Bot) -> RunResult:
 
     try:
         text = await deepseek.generate_post(chosen)
-        await bot.send_message(
-            chat_id=settings.channel_id, text=text, disable_web_page_preview=False
-        )
+        await bot.send_message(chat_id=target, text=text, disable_web_page_preview=False)
     except Exception as exc:  # noqa: BLE001
         log.exception("Publishing failed")
         # Mark the rest as seen but NOT the failed one, so we can retry it later.
-        await mark_seen([c for c in candidates if c["id"] != chosen["id"]])
+        if persist:
+            await mark_seen([c for c in candidates if c["id"] != chosen["id"]])
         return RunResult("error", str(exc))
 
-    await mark_seen(candidates, published_id=chosen["id"])
+    if persist:
+        await mark_seen(candidates, published_id=chosen["id"])
     log.info("Posted: %s", chosen["title"])
     return RunResult("posted", chosen["title"])

@@ -19,8 +19,18 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from app import storage  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.db import Base  # noqa: E402
 from app.models import SeenItem, Setting  # noqa: F401,E402  (register tables)
+
+
+@pytest.fixture(autouse=True)
+def _no_rss_env_override(monkeypatch):
+    """Default every test to no RSS_URL override, so the DB-backed path is
+    exercised regardless of a developer's local .env. Tests that need the
+    override set it explicitly.
+    """
+    monkeypatch.setattr(settings, "rss_url", "")
 
 
 @pytest.fixture

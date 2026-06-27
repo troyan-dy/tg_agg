@@ -27,6 +27,12 @@ async def test_set_rss_url_updates_existing(sqlite_session):
     assert await storage.get_rss_url() == "https://b/feed"
 
 
+async def test_env_override_wins_over_db(sqlite_session, monkeypatch):
+    await storage.set_rss_url("https://from-db/feed")
+    monkeypatch.setattr(storage.settings, "rss_url", "https://from-env/feed")
+    assert await storage.get_rss_url() == "https://from-env/feed"
+
+
 async def test_filter_unseen_empty_input_short_circuits(sqlite_session):
     assert await storage.filter_unseen([]) == set()
 

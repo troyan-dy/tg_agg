@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.config import settings
 from app.db import SessionLocal
 from app.models import SeenItem, Setting
 
@@ -16,6 +17,9 @@ RSS_KEY = "rss_url"
 
 
 async def get_rss_url() -> str | None:
+    """Effective RSS url: the RSS_URL env override wins, else the stored value."""
+    if settings.rss_url:
+        return settings.rss_url
     async with SessionLocal() as session:
         setting = await session.get(Setting, RSS_KEY)
         return setting.value if setting else None

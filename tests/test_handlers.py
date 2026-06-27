@@ -94,6 +94,20 @@ async def test_cmd_run_reports_error(monkeypatch):
     assert "boom" in msg.answer.await_args_list[-1].args[0]
 
 
+async def test_cmd_preview_runs_dry(monkeypatch):
+    run = AsyncMock(return_value=RunResult("posted", "Заголовок"))
+    monkeypatch.setattr(handlers, "run_once", run)
+    monkeypatch.setattr(handlers.settings, "admin_id", 777)
+    msg = _message()
+    bot = AsyncMock()
+
+    await handlers.cmd_preview(msg, bot)
+
+    # Pipeline invoked against the admin chat, without persisting.
+    run.assert_awaited_once_with(bot, chat_id=777, persist=False)
+    assert msg.answer.await_count == 2  # "starting" + summary
+
+
 async def test_cmd_help_answers(monkeypatch):
     msg = _message()
     await handlers.cmd_help(msg)

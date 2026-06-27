@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
+    # RSS: optional ENV override. If set, wins over the DB value (handy for
+    # local testing — no DB row / no /setrss needed). Empty -> use DB.
+    rss_url: str = ""
+
     # Storage (PostgreSQL by default)
     database_url: str = "postgresql+asyncpg://tg:tg@localhost:5432/tg_agg"
 
