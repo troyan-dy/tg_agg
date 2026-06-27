@@ -5,5 +5,10 @@ venv/
 .env
 *.sqlite3
 bot.db
+pgdata/
 .DS_Store
 .pytest_cache/
+
+# auto-deploy runtime files
+deploy/auto-update.log
+deploy/.auto-update.lock

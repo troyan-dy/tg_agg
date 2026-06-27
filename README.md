@@ -42,6 +42,51 @@ docker compose logs -f bot
 `DATABASE_URL` для контейнера бота переопределяется в compose на хост `db`,
 так что значение в `.env` для Docker не важно. Остановить: `docker compose down`.
 
+## Авто-деплой на сервере (cron)
+
+Скрипт [`deploy/auto-update.sh`](deploy/auto-update.sh) раз в несколько минут тянет
+`main` с GitHub и, **только если код изменился**, мягко пересобирает и пересоздаёт
+контейнеры. Пересоздаётся лишь сервис `bot` (старый контейнер гасится через SIGTERM
+с grace-period — long polling останавливается штатно); `db` не трогается, данные
+сохраняются. Если новых коммитов нет — скрипт тихо выходит, ничего не делая.
+
+### Предпосылки на сервере
+
+- Установлены **Docker** и плагин **compose**; пользователь добавлен в группу
+  `docker` (чтобы `docker compose` работал без `sudo` — иначе cron не сможет).
+- Репозиторий склонирован по **HTTPS** (публичный, ключи не нужны):
+  ```bash
+  cd ~ && git clone https://github.com/troyan-dy/tg_agg.git
+  cd ~/tg_agg && cp .env.example .env   # заполнить секреты
+  ```
+- Первый запуск — вручную: `docker compose up --build -d`. Дальше обновления
+  подхватывает cron.
+
+### Настройка cron
+
+```bash
+crontab -e
+```
+
+Добавить (подставив своё имя пользователя вместо `USER`):
+
+```cron
+PATH=/usr/local/bin:/usr/bin:/bin
+*/5 * * * * /home/USER/tg_agg/deploy/auto-update.sh >> /home/USER/tg_agg/deploy/cron.log 2>&1
+```
+
+- `*/5 * * * *` — проверка каждые 5 минут.
+- Строка `PATH=...` обязательна: окружение cron урезанное, без неё не найдутся
+  `docker`/`git`/`flock`.
+- `>> cron.log` ловит ошибки самого запуска (например, недоступен GitHub).
+  Штатную работу скрипт пишет в `deploy/auto-update.log`.
+
+Проверить, что обновления приходят:
+
+```bash
+tail -f ~/tg_agg/deploy/auto-update.log
+```
+
 ## Локальный запуск (uv)
 
 Зависимостями управляет [uv](https://docs.astral.sh/uv/).
