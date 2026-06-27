@@ -210,6 +210,19 @@ async def test_cb_hours_done_closes_grid(monkeypatch):
     assert "09:00" in cb.message.edit_text.await_args.args[0]
 
 
+async def test_startup_notice_includes_settings(monkeypatch):
+    monkeypatch.setattr(handlers, "get_rss_url", AsyncMock(return_value="https://ex.com/f"))
+    monkeypatch.setattr(handlers, "get_stored_rss_url", AsyncMock(return_value="https://ex.com/f"))
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13]))
+    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=[9, 13]))
+
+    text = await handlers.startup_notice()
+
+    assert "перезапущен" in text
+    assert "https://ex.com/f" in text
+    assert "09:00" in text
+
+
 async def test_cmd_run_reports_posted(monkeypatch):
     monkeypatch.setattr(
         handlers, "run_once", AsyncMock(return_value=RunResult("posted", "Заголовок"))

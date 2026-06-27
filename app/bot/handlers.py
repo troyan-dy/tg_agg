@@ -193,19 +193,31 @@ async def _show_rss(message: Message) -> None:
     )
 
 
-async def _show_status(message: Message) -> None:
+async def _status_body() -> str:
+    """The shared «what's configured right now» block, reused by /status and the
+    startup notice."""
     url = await get_rss_url()
     src = await _rss_source_suffix() if url else ""
     hours = await get_run_hours()
     hours_src = await _hours_source_suffix()
-    await message.answer(
-        "📊 <b>Статус</b>\n"
+    return (
         f"📣 Канал: {settings.channel_id}\n"
         f"📡 RSS: {(url or '—')}{src}\n"
         f"🕒 Запуски: {_fmt_hours(hours)} ({settings.timezone}){hours_src}\n"
-        f"🤖 Модель: {settings.deepseek_model}",
-        reply_markup=main_kb(),
+        f"🤖 Модель: {settings.deepseek_model}"
     )
+
+
+async def _show_status(message: Message) -> None:
+    await message.answer(
+        "📊 <b>Статус</b>\n" + await _status_body(), reply_markup=main_kb()
+    )
+
+
+async def startup_notice() -> str:
+    """Message sent to the admin every time the service (re)starts: a heads-up
+    plus the current settings, so a silent crash-restart is never a surprise."""
+    return "♻️ <b>Сервис перезапущен</b>\n" + await _status_body()
 
 
 async def _do_run(message: Message, bot: Bot) -> None:

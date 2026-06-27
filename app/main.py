@@ -15,7 +15,7 @@ from aiogram.types import (
     TelegramObject,
 )
 
-from app.bot.handlers import router
+from app.bot.handlers import router, startup_notice
 from app.config import settings
 from app.db import init_db
 from app.pipeline import run_once
@@ -80,6 +80,14 @@ async def main() -> None:
 
     scheduler = await build_scheduler(bot)
     scheduler.start()
+
+    # Best-effort heads-up to the admin that the service (re)started, with the
+    # current settings. Never let a failed DM (e.g. chat not opened yet) crash
+    # startup.
+    try:
+        await bot.send_message(settings.admin_id, await startup_notice())
+    except Exception:
+        log.warning("Could not send startup notice to admin", exc_info=True)
 
     if settings.run_on_startup:
         asyncio.create_task(run_once(bot))
