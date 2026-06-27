@@ -1,0 +1,92 @@
+# TG RSS Aggregator Bot
+
+Бот ведёт **один** Telegram-канал на автопилоте:
+
+1. Несколько раз в день читает заданную **RSS-ленту**.
+2. Отбрасывает уже обработанные записи (дедуп по id в PostgreSQL).
+3. Отправляет заголовки и краткие описания новых записей в **DeepSeek**, который
+   выбирает самую важную/актуальную новость.
+4. DeepSeek генерирует из неё пост для Telegram.
+5. Бот публикует пост в канал.
+
+RSS-ссылка и ручной запуск управляются **через личный чат с ботом** (только админ).
+
+## Стек
+
+- `aiogram 3` — Telegram-бот и команды управления
+- `feedparser` — разбор RSS/Atom
+- `openai` SDK → **DeepSeek** (OpenAI-совместимый API) — отбор и генерация
+- `APScheduler` — запуск пайплайна по расписанию (cron)
+- `SQLAlchemy (async)` + **PostgreSQL** — хранение виденных записей и настроек
+
+## Команды бота
+
+| Команда | Действие |
+|---|---|
+| `/setrss <url>` | задать RSS-ленту |
+| `/rss` | показать текущую ленту |
+| `/run` | запустить разбор прямо сейчас |
+| `/status` | настройки и расписание |
+| `/help` | справка |
+
+## Запуск через Docker (всё сразу)
+
+Поднимает PostgreSQL и бота одной командой.
+
+```bash
+cp .env.example .env   # BOT_TOKEN, CHANNEL_ID, ADMIN_ID, DEEPSEEK_API_KEY
+docker compose up --build -d
+docker compose logs -f bot
+```
+
+`DATABASE_URL` для контейнера бота переопределяется в compose на хост `db`,
+так что значение в `.env` для Docker не важно. Остановить: `docker compose down`.
+
+## Локальный запуск (uv)
+
+Зависимостями управляет [uv](https://docs.astral.sh/uv/).
+
+```bash
+# 1. PostgreSQL
+docker compose up -d db
+
+# 2. Окружение (uv создаст .venv по pyproject.toml/uv.lock)
+uv sync
+cp .env.example .env   # BOT_TOKEN, CHANNEL_ID, ADMIN_ID, DEEPSEEK_API_KEY
+
+# 3. Старт (создаст таблицы автоматически)
+uv run python -m app.main
+```
+
+Полезное:
+- `uv add <pkg>` / `uv remove <pkg>` — изменить зависимости
+- `uv sync --group dev` — поставить и dev-зависимости (SQLite для офлайн-тестов)
+
+Затем в чате с ботом: `/setrss https://example.com/feed.xml` → `/run`.
+
+### Подготовка
+
+1. Бот у [@BotFather](https://t.me/BotFather) → `BOT_TOKEN`.
+2. Добавить бота в канал **администратором** с правом публикации; `CHANNEL_ID` = `@username` или `-100...`.
+3. Свой `ADMIN_ID` — у [@userinfobot](https://t.me/userinfobot).
+4. Ключ DeepSeek → `DEEPSEEK_API_KEY` (https://platform.deepseek.com).
+5. `RUN_HOURS` — часы запуска (в `TIMEZONE`), напр. `9,13,18`.
+
+## Структура
+
+```
+app/
+├── main.py              # точка входа: бот + планировщик
+├── config.py            # настройки из .env
+├── db.py                # движок, создание таблиц
+├── models.py            # Setting (rss_url) и SeenItem (дедуп)
+├── storage.py           # доступ к данным: rss-url, дедуп, отметки
+├── pipeline.py          # один прогон: RSS → отбор → генерация → публикация
+├── bot/
+│   └── handlers.py      # команды управления (только админ)
+├── services/
+│   ├── rss.py           # загрузка и нормализация ленты
+│   └── deepseek.py      # выбор новости и генерация поста
+└── scheduler/
+    └── worker.py        # APScheduler cron по RUN_HOURS
+```
