@@ -8,7 +8,12 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import Message, TelegramObject
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    Message,
+    TelegramObject,
+)
 
 from app.bot.handlers import router
 from app.config import settings
@@ -34,6 +39,20 @@ async def log_incoming(
     return await handler(event, data)
 
 
+async def _set_commands(bot: Bot) -> None:
+    """Populate the «/» menu in the admin's chat with friendly labels."""
+    commands = [
+        BotCommand(command="menu", description="🏠 Меню"),
+        BotCommand(command="run", description="🚀 Запустить разбор"),
+        BotCommand(command="preview", description="👁 Предпросмотр"),
+        BotCommand(command="rss", description="📡 Текущая лента"),
+        BotCommand(command="setrss", description="📝 Сменить ленту"),
+        BotCommand(command="status", description="📊 Статус"),
+        BotCommand(command="help", description="❓ Помощь"),
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=settings.admin_id))
+
+
 def _setup_logging() -> None:
     logging.basicConfig(
         level=settings.log_level.upper(),
@@ -54,6 +73,8 @@ async def main() -> None:
     dp = Dispatcher()
     dp.message.outer_middleware(log_incoming)
     dp.include_router(router)
+
+    await _set_commands(bot)
 
     scheduler = build_scheduler(bot)
     scheduler.start()
