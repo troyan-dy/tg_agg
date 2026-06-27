@@ -14,6 +14,54 @@ from app.models import SeenItem, Setting
 log = logging.getLogger("storage")
 
 RSS_KEY = "rss_url"
+RUN_HOURS_KEY = "run_hours"
+
+
+def parse_run_hours(text: str) -> list[int]:
+    """Parse a "9,13,18" string into a sorted, unique list of valid hours.
+
+    Raises ValueError if a token is not an integer in 0..23 or nothing is left
+    after cleaning — callers surface that to the admin as a usage hint.
+    """
+    hours: list[int] = []
+    for tok in text.replace(" ", "").split(","):
+        if not tok:
+            continue
+        h = int(tok)  # ValueError on non-numeric tokens
+        if not 0 <= h <= 23:
+            raise ValueError(f"час вне диапазона 0–23: {h}")
+        hours.append(h)
+    if not hours:
+        raise ValueError("не указан ни один час")
+    return sorted(set(hours))
+
+
+async def get_stored_run_hours() -> list[int] | None:
+    """Run hours set via chat (DB), or None if unset. Newest value wins."""
+    async with SessionLocal() as session:
+        setting = await session.get(Setting, RUN_HOURS_KEY)
+    if not setting or not setting.value.strip():
+        return None
+    return parse_run_hours(setting.value)
+
+
+async def get_run_hours() -> list[int]:
+    """Effective run hours: the value set via chat (DB) wins; the RUN_HOURS env
+    var is only a fallback when nothing is stored (mirrors get_rss_url)."""
+    stored = await get_stored_run_hours()
+    return stored if stored is not None else settings.run_hours_list
+
+
+async def set_run_hours(hours: list[int]) -> None:
+    value = ",".join(str(h) for h in hours)
+    async with SessionLocal() as session:
+        setting = await session.get(Setting, RUN_HOURS_KEY)
+        if setting:
+            setting.value = value
+        else:
+            session.add(Setting(key=RUN_HOURS_KEY, value=value))
+        await session.commit()
+    log.info("Run hours set to %s", value)
 
 
 async def get_stored_rss_url() -> str | None:

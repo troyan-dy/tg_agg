@@ -83,6 +83,93 @@ async def test_cmd_rss_when_unset(monkeypatch):
     assert "не задана" in msg.answer.await_args.args[0]
 
 
+async def test_cmd_hours_shows_schedule(monkeypatch):
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13, 18]))
+    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=[9, 13, 18]))
+    msg = _message()
+    await handlers.cmd_hours(msg)
+    out = msg.answer.await_args.args[0]
+    assert "09:00" in out and "13:00" in out and "18:00" in out
+    assert "ENV" not in out
+
+
+async def test_cmd_hours_marks_env_fallback(monkeypatch):
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9]))
+    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=None))
+    msg = _message()
+    await handlers.cmd_hours(msg)
+    assert "ENV" in msg.answer.await_args.args[0]
+
+
+async def test_cmd_sethours_saves_and_reschedules(monkeypatch):
+    set_hours = AsyncMock()
+    resched = AsyncMock()
+    monkeypatch.setattr(handlers, "set_run_hours", set_hours)
+    monkeypatch.setattr(handlers, "reschedule", resched)
+    msg = _message()
+
+    await handlers.cmd_sethours(msg, SimpleNamespace(args="18,9,9"))
+
+    set_hours.assert_awaited_once_with([9, 18])  # parsed, sorted, deduped
+    resched.assert_awaited_once()
+    assert "09:00" in msg.answer.await_args.args[0]
+
+
+async def test_cmd_sethours_rejects_bad_input(monkeypatch):
+    set_hours = AsyncMock()
+    monkeypatch.setattr(handlers, "set_run_hours", set_hours)
+    monkeypatch.setattr(handlers, "reschedule", AsyncMock())
+    msg = _message()
+
+    await handlers.cmd_sethours(msg, SimpleNamespace(args="25,foo"))
+
+    set_hours.assert_not_called()
+    assert "0–23" in msg.answer.await_args.args[0]
+
+
+async def test_sethours_receive_saves_valid(monkeypatch):
+    set_hours = AsyncMock()
+    monkeypatch.setattr(handlers, "set_run_hours", set_hours)
+    monkeypatch.setattr(handlers, "reschedule", AsyncMock())
+    msg = SimpleNamespace(answer=AsyncMock(), text=" 9, 13 ")
+    state = SimpleNamespace(clear=AsyncMock())
+
+    await handlers.sethours_receive(msg, state)
+
+    state.clear.assert_awaited_once()
+    set_hours.assert_awaited_once_with([9, 13])
+
+
+async def test_sethours_receive_rejects_bad(monkeypatch):
+    set_hours = AsyncMock()
+    monkeypatch.setattr(handlers, "set_run_hours", set_hours)
+    msg = SimpleNamespace(answer=AsyncMock(), text="nope")
+    state = SimpleNamespace(clear=AsyncMock())
+
+    await handlers.sethours_receive(msg, state)
+
+    set_hours.assert_not_called()
+    state.clear.assert_not_called()  # stay in the waiting state for a retry
+
+
+async def test_btn_sethours_enters_waiting_state(monkeypatch):
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13]))
+    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=[9, 13]))
+    msg = _message()
+    state = SimpleNamespace(set_state=AsyncMock())
+    await handlers.btn_sethours(msg, state)
+    state.set_state.assert_awaited_once_with(handlers.SetHours.waiting_for_hours)
+    msg.answer.assert_awaited_once()
+
+
+async def test_sethours_cancel_clears_state():
+    msg = _message()
+    state = SimpleNamespace(clear=AsyncMock())
+    await handlers.sethours_cancel(msg, state)
+    state.clear.assert_awaited_once()
+    assert "Отменено" in msg.answer.await_args.args[0]
+
+
 async def test_cmd_run_reports_posted(monkeypatch):
     monkeypatch.setattr(
         handlers, "run_once", AsyncMock(return_value=RunResult("posted", "Заголовок"))
@@ -137,9 +224,13 @@ async def test_btn_run_delegates_to_run(monkeypatch):
 async def test_btn_status_shows_status(monkeypatch):
     monkeypatch.setattr(handlers, "get_rss_url", AsyncMock(return_value="https://ex.com/f"))
     monkeypatch.setattr(handlers, "get_stored_rss_url", AsyncMock(return_value="https://ex.com/f"))
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13, 18]))
+    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=[9, 13, 18]))
     msg = _message()
     await handlers.btn_status(msg)
-    assert "https://ex.com/f" in msg.answer.await_args.args[0]
+    out = msg.answer.await_args.args[0]
+    assert "https://ex.com/f" in out
+    assert "09:00" in out
 
 
 async def test_btn_setrss_enters_waiting_state():

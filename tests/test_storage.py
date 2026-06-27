@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+import pytest
+
 from app import storage
 from app.models import SeenItem
 
@@ -26,6 +28,46 @@ async def test_set_rss_url_updates_existing(sqlite_session):
     await storage.set_rss_url("https://a/feed")
     await storage.set_rss_url("https://b/feed")
     assert await storage.get_rss_url() == "https://b/feed"
+
+
+# --- Run hours -----------------------------------------------------------------
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("9,13,18", [9, 13, 18]),
+        (" 9 , 13 ", [9, 13]),
+        ("18,9,9,13", [9, 13, 18]),  # sorted + deduped
+        ("0,23", [0, 23]),
+        ("9,,13", [9, 13]),  # empty tokens skipped
+    ],
+)
+def test_parse_run_hours_ok(text, expected):
+    assert storage.parse_run_hours(text) == expected
+
+
+@pytest.mark.parametrize("text", ["", " , ", "abc", "9,24", "-1", "9.5"])
+def test_parse_run_hours_rejects(text):
+    with pytest.raises(ValueError):
+        storage.parse_run_hours(text)
+
+
+async def test_run_hours_env_fallback_when_unset(sqlite_session, monkeypatch):
+    monkeypatch.setattr(storage.settings, "run_hours", "7,21")
+    assert await storage.get_stored_run_hours() is None
+    assert await storage.get_run_hours() == [7, 21]
+
+
+async def test_set_then_get_run_hours_wins_over_env(sqlite_session, monkeypatch):
+    monkeypatch.setattr(storage.settings, "run_hours", "7,21")
+    await storage.set_run_hours([8, 12, 20])
+    assert await storage.get_stored_run_hours() == [8, 12, 20]
+    assert await storage.get_run_hours() == [8, 12, 20]
+
+
+async def test_set_run_hours_updates_existing(sqlite_session):
+    await storage.set_run_hours([9, 13])
+    await storage.set_run_hours([10, 14])
+    assert await storage.get_run_hours() == [10, 14]
 
 
 async def test_db_value_wins_over_env(sqlite_session, monkeypatch):

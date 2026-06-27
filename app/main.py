@@ -47,6 +47,8 @@ async def _set_commands(bot: Bot) -> None:
         BotCommand(command="preview", description="👁 Предпросмотр"),
         BotCommand(command="rss", description="📡 Текущая лента"),
         BotCommand(command="setrss", description="📝 Сменить ленту"),
+        BotCommand(command="hours", description="🕒 Часы публикации"),
+        BotCommand(command="sethours", description="🕒 Сменить часы"),
         BotCommand(command="status", description="📊 Статус"),
         BotCommand(command="help", description="❓ Помощь"),
     ]
@@ -76,7 +78,7 @@ async def main() -> None:
 
     await _set_commands(bot)
 
-    scheduler = build_scheduler(bot)
+    scheduler = await build_scheduler(bot)
     scheduler.start()
 
     if settings.run_on_startup:

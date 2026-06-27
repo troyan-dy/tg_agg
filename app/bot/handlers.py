@@ -17,7 +17,16 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.config import settings
 from app.pipeline import run_once
-from app.storage import get_rss_url, get_stored_rss_url, set_rss_url
+from app.scheduler.worker import reschedule
+from app.storage import (
+    get_rss_url,
+    get_run_hours,
+    get_stored_rss_url,
+    get_stored_run_hours,
+    parse_run_hours,
+    set_rss_url,
+    set_run_hours,
+)
 
 log = logging.getLogger("handlers")
 
@@ -31,6 +40,7 @@ BTN_PREVIEW = "👁 Предпросмотр"
 BTN_RSS = "📡 Лента"
 BTN_STATUS = "📊 Статус"
 BTN_SETRSS = "📝 Сменить ленту"
+BTN_SETHOURS = "🕒 Часы"
 BTN_HELP = "❓ Помощь"
 BTN_CANCEL = "❌ Отмена"
 
@@ -41,7 +51,8 @@ def main_kb() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=BTN_RUN), KeyboardButton(text=BTN_PREVIEW)],
             [KeyboardButton(text=BTN_RSS), KeyboardButton(text=BTN_STATUS)],
-            [KeyboardButton(text=BTN_SETRSS), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_SETRSS), KeyboardButton(text=BTN_SETHOURS)],
+            [KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -49,12 +60,12 @@ def main_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def cancel_kb() -> ReplyKeyboardMarkup:
-    """One-button keyboard shown while waiting for the RSS url."""
+def cancel_kb(placeholder: str = "Пришли ссылку на ленту…") -> ReplyKeyboardMarkup:
+    """One-button keyboard shown while waiting for input in a dialog."""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=BTN_CANCEL)]],
         resize_keyboard=True,
-        input_field_placeholder="Пришли ссылку на ленту…",
+        input_field_placeholder=placeholder,
     )
 
 
@@ -62,6 +73,12 @@ class SetRss(StatesGroup):
     """Conversational flow for the «📝 Сменить ленту» button."""
 
     waiting_for_url = State()
+
+
+class SetHours(StatesGroup):
+    """Conversational flow for the «🕒 Часы» button."""
+
+    waiting_for_hours = State()
 
 
 HELP = (
@@ -73,6 +90,9 @@ HELP = (
     "и в базу не пишется\n"
     "• 📡 <code>/rss</code> — показать текущую ленту\n"
     "• 📝 <code>/setrss &lt;url&gt;</code> — задать RSS-ленту\n"
+    "• 🕒 <code>/hours</code> — показать часы публикации\n"
+    "• 🕒 <code>/sethours 9,13,18</code> — задать часы публикации (в "
+    f"{settings.timezone})\n"
     "• 📊 <code>/status</code> — настройки и расписание\n"
     "• ❓ <code>/help</code> — эта справка"
 )
@@ -96,6 +116,35 @@ async def _rss_source_suffix() -> str:
     return "" if await get_stored_rss_url() else " (из ENV — фолбэк)"
 
 
+def _fmt_hours(hours: list[int]) -> str:
+    return ", ".join(f"{h:02d}:00" for h in hours)
+
+
+async def _hours_source_suffix() -> str:
+    """Same ENV-fallback labelling as RSS, but for the run hours."""
+    return "" if await get_stored_run_hours() else " (из ENV — фолбэк)"
+
+
+async def _save_hours(message: Message, hours: list[int]) -> None:
+    """Persist the new hours and rebuild the live cron schedule at once."""
+    await set_run_hours(hours)
+    await reschedule()
+    log.info("Admin set run hours: %s", hours)
+    await message.answer(
+        f"✅ Часы публикации сохранены: {_fmt_hours(hours)} ({settings.timezone})",
+        reply_markup=main_kb(),
+    )
+
+
+async def _show_hours(message: Message) -> None:
+    hours = await get_run_hours()
+    src = await _hours_source_suffix()
+    await message.answer(
+        f"🕒 Часы публикации{src}:\n{_fmt_hours(hours)} ({settings.timezone})",
+        reply_markup=main_kb(),
+    )
+
+
 async def _show_rss(message: Message) -> None:
     url = await get_rss_url()
     src = await _rss_source_suffix() if url else ""
@@ -110,12 +159,13 @@ async def _show_rss(message: Message) -> None:
 async def _show_status(message: Message) -> None:
     url = await get_rss_url()
     src = await _rss_source_suffix() if url else ""
+    hours = await get_run_hours()
+    hours_src = await _hours_source_suffix()
     await message.answer(
         "📊 <b>Статус</b>\n"
         f"📣 Канал: {settings.channel_id}\n"
         f"📡 RSS: {(url or '—')}{src}\n"
-        f"🕒 Запуски: {', '.join(f'{h:02d}:00' for h in settings.run_hours_list)}"
-        f" ({settings.timezone})\n"
+        f"🕒 Запуски: {_fmt_hours(hours)} ({settings.timezone}){hours_src}\n"
         f"🤖 Модель: {settings.deepseek_model}",
         reply_markup=main_kb(),
     )
@@ -171,6 +221,27 @@ async def cmd_rss(message: Message) -> None:
     await _show_rss(message)
 
 
+HOURS_HINT = (
+    "Укажи часы через запятую (0–23), напр. "
+    "<code>/sethours 9,13,18</code>"
+)
+
+
+@router.message(Command("hours"))
+async def cmd_hours(message: Message) -> None:
+    await _show_hours(message)
+
+
+@router.message(Command("sethours"))
+async def cmd_sethours(message: Message, command: CommandObject) -> None:
+    try:
+        hours = parse_run_hours(command.args or "")
+    except ValueError:
+        await message.answer(HOURS_HINT)
+        return
+    await _save_hours(message, hours)
+
+
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
     await _show_status(message)
@@ -210,6 +281,39 @@ async def btn_status(message: Message) -> None:
 @router.message(F.text == BTN_HELP)
 async def btn_help(message: Message) -> None:
     await cmd_help(message)
+
+
+# --- «Часы» conversational flow ------------------------------------------------
+@router.message(F.text == BTN_SETHOURS)
+async def btn_sethours(message: Message, state: FSMContext) -> None:
+    hours = await get_run_hours()
+    src = await _hours_source_suffix()
+    await state.set_state(SetHours.waiting_for_hours)
+    await message.answer(
+        f"🕒 Сейчас публикую в {_fmt_hours(hours)} ({settings.timezone}){src}.\n"
+        "Пришли новые часы через запятую (0–23), напр. <code>9,13,18</code>.",
+        reply_markup=cancel_kb("Напиши часы, напр. 9,13,18…"),
+    )
+
+
+@router.message(SetHours.waiting_for_hours, F.text == BTN_CANCEL)
+async def sethours_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_kb())
+
+
+@router.message(SetHours.waiting_for_hours)
+async def sethours_receive(message: Message, state: FSMContext) -> None:
+    try:
+        hours = parse_run_hours(message.text or "")
+    except ValueError:
+        await message.answer(
+            "Не понял часы 🤔 Пришли числа 0–23 через запятую, напр. "
+            "<code>9,13,18</code>, или нажми «❌ Отмена»."
+        )
+        return
+    await state.clear()
+    await _save_hours(message, hours)
 
 
 # --- «Сменить ленту» conversational flow ---------------------------------------
