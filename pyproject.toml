@@ -3,7 +3,7 @@ name = "tg-agg"
 version = "0.1.0"
 description = "Telegram channel bot that aggregates an RSS feed and posts AI-selected news via DeepSeek"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = "==3.13.*"
 dependencies = [
     "aiogram>=3.4",
     "sqlalchemy[asyncio]>=2.0",
@@ -44,7 +44,7 @@ omit = ["app/main.py", "app/scheduler/worker.py"]
 exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
@@ -52,7 +52,7 @@ line-length = 100
 select = ["E", "F", "I", "UP", "B", "C4"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 files = ["app"]
 ignore_missing_imports = true
 check_untyped_defs = true
