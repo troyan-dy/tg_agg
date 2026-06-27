@@ -8,6 +8,8 @@ bot.db
 pgdata/
 .DS_Store
 .pytest_cache/
+.coverage
+htmlcov/
 
 # auto-deploy runtime files
 deploy/auto-update.log

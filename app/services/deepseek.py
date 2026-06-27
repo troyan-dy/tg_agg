@@ -74,7 +74,8 @@ async def pick_most_relevant(candidates: list[dict], recent_titles: list[str] | 
 async def generate_post(entry: dict) -> str:
     """Generate a ready-to-send Telegram post (HTML) for a news entry."""
     prompt = (
-        f"Напиши пост для Telegram-канала СТРОГО на {settings.post_language} языке по этой новости.\n"
+        f"Напиши пост для Telegram-канала СТРОГО на {settings.post_language} языке "
+        "по этой новости.\n"
         f"Заголовок: {entry['title']}\n"
         f"Описание: {entry.get('summary', '')}\n"
         f"Ссылка: {entry.get('link', '')}\n\n"
