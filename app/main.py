@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import Message, TelegramObject
 
 from app.bot.handlers import router
 from app.config import settings
@@ -14,6 +17,21 @@ from app.pipeline import run_once
 from app.scheduler.worker import build_scheduler
 
 log = logging.getLogger("main")
+
+
+async def log_incoming(
+    handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+    event: TelegramObject,
+    data: dict[str, Any],
+) -> Any:
+    """Log every incoming message before the admin filter runs (diagnostic)."""
+    if isinstance(event, Message):
+        uid = event.from_user.id if event.from_user else None
+        log.info(
+            "Incoming message from id=%s (admin_id=%s, allowed=%s): %r",
+            uid, settings.admin_id, uid == settings.admin_id, event.text,
+        )
+    return await handler(event, data)
 
 
 def _setup_logging() -> None:
@@ -34,6 +52,7 @@ async def main() -> None:
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    dp.message.outer_middleware(log_incoming)
     dp.include_router(router)
 
     scheduler = build_scheduler(bot)
