@@ -13,11 +13,22 @@ from app.db import init_db
 from app.pipeline import run_once
 from app.scheduler.worker import build_scheduler
 
+log = logging.getLogger("main")
+
+
+def _setup_logging() -> None:
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    # Quiet down noisy third-party loggers; keep our own at the configured level.
+    for noisy in ("aiogram.event", "apscheduler", "httpx", "httpcore", "openai"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 async def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    _setup_logging()
+    log.info("Starting bot for channel %s", settings.channel_id)
 
     await init_db()
 
@@ -35,6 +46,7 @@ async def main() -> None:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
+        log.info("Shutting down")
         scheduler.shutdown(wait=False)
         await bot.session.close()
 

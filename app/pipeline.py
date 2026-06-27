@@ -37,6 +37,7 @@ async def run_once(bot: Bot) -> RunResult:
         log.info("No new entries")
         return RunResult("no_new", "Новых записей нет.")
 
+    log.info("%d new candidates, asking DeepSeek to pick", len(candidates))
     index = await deepseek.pick_most_relevant(candidates)
     chosen = candidates[index]
 

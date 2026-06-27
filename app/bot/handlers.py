@@ -1,6 +1,7 @@
 """Chat control: set the RSS feed, trigger a run, check status."""
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlparse
 
 from aiogram import Bot, F, Router
@@ -10,6 +11,8 @@ from aiogram.types import Message
 from app.config import settings
 from app.pipeline import run_once
 from app.storage import get_rss_url, set_rss_url
+
+log = logging.getLogger("handlers")
 
 router = Router()
 # Only the admin may control the bot.
@@ -44,6 +47,7 @@ async def cmd_setrss(message: Message, command: CommandObject) -> None:
         await message.answer("Укажи корректный URL: <code>/setrss https://example.com/feed.xml</code>")
         return
     await set_rss_url(url)
+    log.info("Admin set RSS url: %s", url)
     await message.answer(f"✅ RSS-лента сохранена:\n{url}")
 
 
@@ -70,6 +74,7 @@ async def cmd_status(message: Message) -> None:
 
 @router.message(Command("run"))
 async def cmd_run(message: Message, bot: Bot) -> None:
+    log.info("Manual /run triggered by admin")
     await message.answer("⏳ Запускаю разбор ленты…")
     result = await run_once(bot)
     replies = {

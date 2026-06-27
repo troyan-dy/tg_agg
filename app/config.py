@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Storage (PostgreSQL by default)
     database_url: str = "postgresql+asyncpg://tg:tg@localhost:5432/tg_agg"
 
+    # Logging
+    log_level: str = "INFO"
+
     # Scheduler: hours of the day (server TIMEZONE) to run the pipeline
     timezone: str = "UTC"
     run_hours: str = "9,13,18"

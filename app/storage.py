@@ -1,6 +1,7 @@
 """Thin data-access helpers over the DB."""
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -8,6 +9,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import SessionLocal
 from app.models import SeenItem, Setting
+
+log = logging.getLogger("storage")
 
 RSS_KEY = "rss_url"
 
@@ -26,6 +29,7 @@ async def set_rss_url(url: str) -> None:
         else:
             session.add(Setting(key=RSS_KEY, value=url))
         await session.commit()
+    log.info("RSS url set to %s", url)
 
 
 async def filter_unseen(entry_ids: list[str]) -> set[str]:
@@ -64,3 +68,4 @@ async def mark_seen(items: list[dict], published_id: str | None = None) -> None:
         stmt = stmt.on_conflict_do_nothing(index_elements=[SeenItem.entry_id])
         await session.execute(stmt)
         await session.commit()
+    log.debug("Marked %d entries seen (published=%s)", len(rows), published_id)
