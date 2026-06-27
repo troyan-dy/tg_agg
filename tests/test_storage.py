@@ -6,6 +6,7 @@ verified with the pg insert + session mocked instead.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 from app import storage
@@ -45,6 +46,32 @@ async def test_filter_unseen_returns_only_unknown(sqlite_session):
 
     result = await storage.filter_unseen(["known-1", "new-1", "known-2", "new-2"])
     assert result == {"new-1", "new-2"}
+
+
+async def test_recent_published_titles_filters_and_orders(sqlite_session):
+    now = datetime.now(UTC)
+    async with sqlite_session() as session:
+        # Published recently — included, newest first.
+        session.add(SeenItem(
+            entry_id="p-old", title="Старее", published=True, posted_at=now - timedelta(hours=5)
+        ))
+        session.add(SeenItem(
+            entry_id="p-new", title="Новее", published=True, posted_at=now - timedelta(hours=1)
+        ))
+        # Published too long ago — excluded.
+        session.add(SeenItem(
+            entry_id="p-stale", title="Давнее", published=True, posted_at=now - timedelta(hours=30)
+        ))
+        # Seen but never published — excluded.
+        session.add(SeenItem(entry_id="seen", title="Невышедшее", published=False))
+        await session.commit()
+
+    titles = await storage.recent_published_titles()
+    assert titles == ["Новее", "Старее"]
+
+
+async def test_recent_published_titles_empty(sqlite_session):
+    assert await storage.recent_published_titles() == []
 
 
 class _FakeSession:

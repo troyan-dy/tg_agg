@@ -7,7 +7,7 @@ from aiogram import Bot
 
 from app.config import settings
 from app.services import deepseek, rss
-from app.storage import filter_unseen, get_rss_url, mark_seen
+from app.storage import filter_unseen, get_rss_url, mark_seen, recent_published_titles
 
 log = logging.getLogger("pipeline")
 
@@ -46,8 +46,12 @@ async def run_once(
         log.info("No new entries")
         return RunResult("no_new", "Новых записей нет.")
 
-    log.info("%d new candidates, asking DeepSeek to pick", len(candidates))
-    index = await deepseek.pick_most_relevant(candidates)
+    recent = await recent_published_titles()
+    log.info(
+        "%d new candidates, %d posted in last 24h, asking DeepSeek to pick",
+        len(candidates), len(recent),
+    )
+    index = await deepseek.pick_most_relevant(candidates, recent)
     chosen = candidates[index]
 
     try:

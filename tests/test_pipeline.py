@@ -50,6 +50,7 @@ async def test_posted_happy_path(monkeypatch, bot):
     monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
     monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
     monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1", "2"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=1))
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="<b>post</b>"))
     mark = AsyncMock()
@@ -76,6 +77,7 @@ async def test_max_candidates_limits_what_deepseek_sees(monkeypatch, bot):
     monkeypatch.setattr(
         pipeline, "filter_unseen", AsyncMock(return_value={"0", "1", "2", "3", "4"})
     )
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
     pick = AsyncMock(return_value=0)
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="p"))
@@ -87,11 +89,30 @@ async def test_max_candidates_limits_what_deepseek_sees(monkeypatch, bot):
     assert len(shown) == 2  # capped by max_candidates
 
 
+async def test_recent_published_titles_passed_to_pick(monkeypatch, bot):
+    monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=_entries(3)))
+    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1", "2"}))
+    monkeypatch.setattr(
+        pipeline, "recent_published_titles", AsyncMock(return_value=["вчерашний пост"])
+    )
+    pick = AsyncMock(return_value=0)
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
+    monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="p"))
+    monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
+
+    await pipeline.run_once(bot)
+
+    # Recently published headlines are handed to the picker as the 2nd argument.
+    assert pick.await_args.args[1] == ["вчерашний пост"]
+
+
 async def test_publish_failure_marks_rest_but_not_chosen(monkeypatch, bot):
     entries = _entries(3)
     monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
     monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
     monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1", "2"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=1))
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="post"))
     bot.send_message.side_effect = RuntimeError("telegram down")
@@ -112,6 +133,7 @@ async def test_generate_post_failure_is_caught(monkeypatch, bot):
     monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
     monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
     monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=0))
     monkeypatch.setattr(
         pipeline.deepseek, "generate_post", AsyncMock(side_effect=ValueError("llm error"))
@@ -128,6 +150,7 @@ async def test_preview_sends_to_chat_and_skips_persist(monkeypatch, bot):
     monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
     monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
     monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1", "2"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=1))
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="<b>p</b>"))
     mark = AsyncMock()
@@ -149,6 +172,7 @@ async def test_preview_publish_failure_skips_persist(monkeypatch, bot):
     monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
     monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
     monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=0))
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="post"))
     bot.send_message.side_effect = RuntimeError("telegram down")

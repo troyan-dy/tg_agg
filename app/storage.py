@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -46,6 +46,22 @@ async def filter_unseen(entry_ids: list[str]) -> set[str]:
         )
         known = set(result.scalars().all())
     return set(entry_ids) - known
+
+
+async def recent_published_titles(within_hours: int = 24) -> list[str]:
+    """Titles of entries published to the channel within the last `within_hours`.
+
+    Fed to DeepSeek so it can diversify topics and avoid repeating a story
+    that already went out recently. Newest first.
+    """
+    cutoff = datetime.now(UTC) - timedelta(hours=within_hours)
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SeenItem.title)
+            .where(SeenItem.published.is_(True), SeenItem.posted_at >= cutoff)
+            .order_by(SeenItem.posted_at.desc())
+        )
+        return [t for t in result.scalars().all() if t]
 
 
 async def mark_seen(items: list[dict], published_id: str | None = None) -> None:

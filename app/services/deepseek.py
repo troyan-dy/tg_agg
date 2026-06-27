@@ -22,11 +22,15 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-async def pick_most_relevant(candidates: list[dict]) -> int:
-    """Return the index of the most newsworthy candidate.
+async def pick_most_relevant(
+    candidates: list[dict], recent_titles: list[str] | None = None
+) -> int:
+    """Return the index of the best candidate to publish next.
 
-    `candidates` is a list of {title, summary}. Falls back to 0 on any
-    parsing problem so the pipeline still posts something sane.
+    `candidates` is a list of {title, summary} that have NOT been published yet.
+    `recent_titles` are headlines already posted in the last day — passed to the
+    model so it can diversify topics and avoid repeating a recent story.
+    Falls back to 0 on any parsing problem so the pipeline still posts something.
     """
     if len(candidates) == 1:
         return 0
@@ -34,11 +38,22 @@ async def pick_most_relevant(candidates: list[dict]) -> int:
     listing = "\n".join(
         f"{i}. {c['title']}\n   {c.get('summary', '')}" for i, c in enumerate(candidates)
     )
+    published = (
+        "\n".join(f"- {t}" for t in recent_titles)
+        if recent_titles
+        else "(за последние сутки ничего не публиковалось)"
+    )
     prompt = (
-        "Ниже список свежих новостей из RSS-ленты. Выбери ОДНУ самую важную и "
-        "актуальную для публикации в Telegram-канале прямо сейчас. "
-        "Ответь строго JSON-объектом вида {\"index\": <число>, \"reason\": \"<кратко>\"}.\n\n"
-        f"{listing}"
+        "Ты редактор Telegram-канала и подбираешь следующую публикацию.\n\n"
+        "Уже опубликовано за последние сутки:\n"
+        f"{published}\n\n"
+        "Свежие новости-кандидаты (ещё не публиковались):\n"
+        f"{listing}\n\n"
+        "Выбери ОДНУ новость для публикации прямо сейчас. Она должна быть важной и "
+        "актуальной, но при этом РАЗНООБРАЗИТЬ ленту: по теме и сюжету отличаться "
+        "от уже опубликованного выше — не повторяй недавние темы. Если несколько "
+        "кандидатов про одно и то же, предпочти новость из другой тематики.\n"
+        "Ответь строго JSON-объектом вида {\"index\": <число>, \"reason\": \"<кратко>\"}."
     )
     resp = await _get_client().chat.completions.create(
         model=settings.deepseek_model,
