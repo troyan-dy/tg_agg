@@ -73,7 +73,9 @@ async def test_max_candidates_limits_what_deepseek_sees(monkeypatch, bot):
     entries = _entries(5)
     monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
     monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
-    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1", "2", "3", "4"}))
+    monkeypatch.setattr(
+        pipeline, "filter_unseen", AsyncMock(return_value={"0", "1", "2", "3", "4"})
+    )
     pick = AsyncMock(return_value=0)
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="p"))

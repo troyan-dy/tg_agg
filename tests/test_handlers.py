@@ -74,7 +74,9 @@ async def test_cmd_rss_when_unset(monkeypatch):
 
 
 async def test_cmd_run_reports_posted(monkeypatch):
-    monkeypatch.setattr(handlers, "run_once", AsyncMock(return_value=RunResult("posted", "Заголовок")))
+    monkeypatch.setattr(
+        handlers, "run_once", AsyncMock(return_value=RunResult("posted", "Заголовок"))
+    )
     msg = _message()
     bot = AsyncMock()
 

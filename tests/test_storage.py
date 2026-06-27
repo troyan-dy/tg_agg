@@ -6,10 +6,7 @@ verified with the pg insert + session mocked instead.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
+from unittest.mock import MagicMock
 
 from app import storage
 from app.models import SeenItem

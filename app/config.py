@@ -31,4 +31,4 @@ class Settings(BaseSettings):
         return [int(h.strip()) for h in self.run_hours.split(",") if h.strip()]
 
 
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]  # values come from env/.env

@@ -42,7 +42,9 @@ async def run_once(bot: Bot) -> RunResult:
 
     try:
         text = await deepseek.generate_post(chosen)
-        await bot.send_message(chat_id=settings.channel_id, text=text, disable_web_page_preview=False)
+        await bot.send_message(
+            chat_id=settings.channel_id, text=text, disable_web_page_preview=False
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception("Publishing failed")
         # Mark the rest as seen but NOT the failed one, so we can retry it later.

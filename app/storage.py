@@ -1,7 +1,7 @@
 """Thin data-access helpers over the DB."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -48,7 +48,7 @@ async def mark_seen(items: list[dict], published_id: str | None = None) -> None:
     """
     if not items:
         return
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = [
         {
             "entry_id": it["id"],

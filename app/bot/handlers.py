@@ -16,7 +16,7 @@ router = Router()
 router.message.filter(F.from_user.id == settings.admin_id)
 
 HELP = (
-    "Я веду канал <b>{channel}</b>: периодически читаю RSS, выбираю через DeepSeek "
+    f"Я веду канал <b>{settings.channel_id}</b>: периодически читаю RSS, выбираю через DeepSeek "
     "самую важную новость и публикую пост.\n\n"
     "Команды:\n"
     "• <code>/setrss &lt;url&gt;</code> — задать RSS-ленту\n"
@@ -24,7 +24,7 @@ HELP = (
     "• <code>/run</code> — запустить разбор прямо сейчас\n"
     "• <code>/status</code> — настройки и расписание\n"
     "• <code>/help</code> — эта справка"
-).format(channel=settings.channel_id)
+)
 
 
 def _valid_url(url: str) -> bool:
@@ -50,7 +50,9 @@ async def cmd_setrss(message: Message, command: CommandObject) -> None:
 @router.message(Command("rss"))
 async def cmd_rss(message: Message) -> None:
     url = await get_rss_url()
-    await message.answer(f"Текущая лента:\n{url}" if url else "RSS-лента ещё не задана. /setrss <url>")
+    await message.answer(
+        f"Текущая лента:\n{url}" if url else "RSS-лента ещё не задана. /setrss <url>"
+    )
 
 
 @router.message(Command("status"))
@@ -60,7 +62,8 @@ async def cmd_status(message: Message) -> None:
         "<b>Статус</b>\n"
         f"Канал: {settings.channel_id}\n"
         f"RSS: {url or '—'}\n"
-        f"Запуски: {', '.join(f'{h:02d}:00' for h in settings.run_hours_list)} ({settings.timezone})\n"
+        f"Запуски: {', '.join(f'{h:02d}:00' for h in settings.run_hours_list)}"
+        f" ({settings.timezone})\n"
         f"Модель: {settings.deepseek_model}"
     )
 

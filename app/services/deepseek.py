@@ -16,7 +16,9 @@ _client: AsyncOpenAI | None = None
 def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
+        _client = AsyncOpenAI(
+            api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url
+        )
     return _client
 
 
@@ -45,7 +47,7 @@ async def pick_most_relevant(candidates: list[dict]) -> int:
         temperature=0.3,
     )
     try:
-        data = json.loads(resp.choices[0].message.content)
+        data = json.loads(resp.choices[0].message.content or "")
         index = int(data["index"])
         if 0 <= index < len(candidates):
             log.info("Picked #%s: %s", index, data.get("reason", ""))
@@ -74,4 +76,4 @@ async def generate_post(entry: dict) -> str:
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
     )
-    return resp.choices[0].message.content.strip()
+    return (resp.choices[0].message.content or "").strip()
