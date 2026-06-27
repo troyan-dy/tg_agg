@@ -1,4 +1,5 @@
 """DeepSeek (OpenAI-compatible) calls: pick the top story and write a post."""
+
 from __future__ import annotations
 
 import json
@@ -22,9 +23,7 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-async def pick_most_relevant(
-    candidates: list[dict], recent_titles: list[str] | None = None
-) -> int:
+async def pick_most_relevant(candidates: list[dict], recent_titles: list[str] | None = None) -> int:
     """Return the index of the best candidate to publish next.
 
     `candidates` is a list of {title, summary} that have NOT been published yet.
@@ -53,7 +52,7 @@ async def pick_most_relevant(
         "актуальной, но при этом РАЗНООБРАЗИТЬ ленту: по теме и сюжету отличаться "
         "от уже опубликованного выше — не повторяй недавние темы. Если несколько "
         "кандидатов про одно и то же, предпочти новость из другой тематики.\n"
-        "Ответь строго JSON-объектом вида {\"index\": <число>, \"reason\": \"<кратко>\"}."
+        'Ответь строго JSON-объектом вида {"index": <число>, "reason": "<кратко>"}.'
     )
     resp = await _get_client().chat.completions.create(
         model=settings.deepseek_model,
@@ -75,7 +74,7 @@ async def pick_most_relevant(
 async def generate_post(entry: dict) -> str:
     """Generate a ready-to-send Telegram post (HTML) for a news entry."""
     prompt = (
-        f"Напиши пост для Telegram-канала на {settings.post_language} языке по этой новости.\n"
+        f"Напиши пост для Telegram-канала СТРОГО на {settings.post_language} языке по этой новости.\n"
         f"Заголовок: {entry['title']}\n"
         f"Описание: {entry.get('summary', '')}\n"
         f"Ссылка: {entry.get('link', '')}\n\n"
