@@ -74,6 +74,20 @@ async def test_recent_published_titles_empty(sqlite_session):
     assert await storage.recent_published_titles() == []
 
 
+async def test_published_among_returns_only_published(sqlite_session):
+    async with sqlite_session() as session:
+        session.add(SeenItem(entry_id="pub", title="P", published=True))
+        session.add(SeenItem(entry_id="seen", title="S", published=False))
+        await session.commit()
+
+    result = await storage.published_among(["pub", "seen", "unknown"])
+    assert result == {"pub"}
+
+
+async def test_published_among_empty_input(sqlite_session):
+    assert await storage.published_among([]) == set()
+
+
 class _FakeSession:
     """Captures the statement passed to execute()."""
 
@@ -142,8 +156,37 @@ async def test_mark_seen_flags_published_entry(monkeypatch):
 
 async def test_mark_seen_without_published_id_flags_nothing(monkeypatch):
     captured = _capture_pg_insert(monkeypatch)
-    monkeypatch.setattr(storage, "SessionLocal", lambda: _FakeSession())
+    executed: list = []
+
+    class _Rec(_FakeSession):
+        async def execute(self, stmt):
+            executed.append(stmt)
+
+    monkeypatch.setattr(storage, "SessionLocal", lambda: _Rec())
 
     await storage.mark_seen([{"id": "a", "title": "A", "link": "la"}])
     assert all(r["published"] is False for r in captured["rows"])
     assert all(r["posted_at"] is None for r in captured["rows"])
+    # No published_id → only the bulk insert runs, no UPDATE.
+    from sqlalchemy.sql.dml import Update
+
+    assert not any(isinstance(s, Update) for s in executed)
+
+
+async def test_mark_seen_forces_published_flag_on_conflict(monkeypatch):
+    """Re-posting an already-seen entry must still record the publication via an
+    explicit UPDATE (on_conflict_do_nothing would leave published=False)."""
+    _capture_pg_insert(monkeypatch)
+    executed: list = []
+
+    class _Rec(_FakeSession):
+        async def execute(self, stmt):
+            executed.append(stmt)
+
+    monkeypatch.setattr(storage, "SessionLocal", lambda: _Rec())
+
+    await storage.mark_seen([{"id": "b", "title": "B", "link": "lb"}], published_id="b")
+
+    from sqlalchemy.sql.dml import Update
+
+    assert any(isinstance(s, Update) for s in executed)

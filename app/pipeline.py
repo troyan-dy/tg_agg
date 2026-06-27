@@ -7,7 +7,13 @@ from aiogram import Bot
 
 from app.config import settings
 from app.services import deepseek, rss
-from app.storage import filter_unseen, get_rss_url, mark_seen, recent_published_titles
+from app.storage import (
+    filter_unseen,
+    get_rss_url,
+    mark_seen,
+    published_among,
+    recent_published_titles,
+)
 
 log = logging.getLogger("pipeline")
 
@@ -40,11 +46,22 @@ async def run_once(
     if not entries:
         return RunResult("no_new", "Лента пуста или недоступна.")
 
-    unseen_ids = await filter_unseen([e["id"] for e in entries])
+    ids = [e["id"] for e in entries]
+    unseen_ids = await filter_unseen(ids)
     candidates = [e for e in entries if e["id"] in unseen_ids][: settings.max_candidates]
     if not candidates:
-        log.info("No new entries")
-        return RunResult("no_new", "Новых записей нет.")
+        # No fresh entries. Rather than give up, re-surface entries already seen
+        # but never published (may break chronological order — acceptable here),
+        # so a manual run still has something to post.
+        published_ids = await published_among(ids)
+        candidates = [e for e in entries if e["id"] not in published_ids][
+            : settings.max_candidates
+        ]
+        if candidates:
+            log.info("No fresh entries; falling back to %d seen-but-unposted", len(candidates))
+    if not candidates:
+        log.info("Nothing to post — every feed entry is already published")
+        return RunResult("no_new", "В ленте нет ничего, что ещё не было опубликовано.")
 
     recent = await recent_published_titles()
     log.info(

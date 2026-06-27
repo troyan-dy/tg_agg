@@ -33,13 +33,20 @@ async def test_no_new_when_feed_empty(monkeypatch, bot):
     bot.send_message.assert_not_called()
 
 
-async def test_no_new_when_all_seen(monkeypatch, bot):
+async def test_all_seen_consults_fallback(monkeypatch, bot):
+    # All entries seen → the pipeline must consult the seen-but-unpublished
+    # fallback rather than immediately reporting "no_new".
     monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
     monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=_entries(3)))
     monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value=set()))
+    fallback = AsyncMock(return_value={"0", "1", "2"})  # everything already published
+    monkeypatch.setattr(pipeline, "published_among", fallback)
     pick = AsyncMock()
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
+
     result = await pipeline.run_once(bot)
+
+    fallback.assert_awaited_once()
     assert result.status == "no_new"
     pick.assert_not_called()
     bot.send_message.assert_not_called()
@@ -87,6 +94,44 @@ async def test_max_candidates_limits_what_deepseek_sees(monkeypatch, bot):
 
     shown = pick.await_args.args[0]
     assert len(shown) == 2  # capped by max_candidates
+
+
+async def test_falls_back_to_seen_but_unpublished(monkeypatch, bot):
+    entries = _entries(3)  # ids 0,1,2
+    monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
+    # Nothing fresh — every entry has been seen.
+    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value=set()))
+    # Only id "0" was actually published; "1" and "2" are seen-but-unposted.
+    monkeypatch.setattr(pipeline, "published_among", AsyncMock(return_value={"0"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
+    pick = AsyncMock(return_value=0)
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
+    monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="p"))
+    monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
+
+    result = await pipeline.run_once(bot)
+
+    assert result.status == "posted"
+    # The published entry is excluded; the fallback offers the unpublished ones.
+    shown = {e["id"] for e in pick.await_args.args[0]}
+    assert shown == {"1", "2"}
+
+
+async def test_no_new_only_when_all_published(monkeypatch, bot):
+    entries = _entries(2)
+    monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
+    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value=set()))
+    monkeypatch.setattr(pipeline, "published_among", AsyncMock(return_value={"0", "1"}))
+    pick = AsyncMock()
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
+
+    result = await pipeline.run_once(bot)
+
+    assert result.status == "no_new"
+    pick.assert_not_called()
+    bot.send_message.assert_not_called()
 
 
 async def test_recent_published_titles_passed_to_pick(monkeypatch, bot):

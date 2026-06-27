@@ -10,13 +10,22 @@
 1. Берёт RSS-url из БД (`storage.get_rss_url`); нет url → `no_feed`.
 2. `services/rss.fetch_entries` парсит ленту (feedparser в отдельном потоке), чистит HTML.
 3. `storage.filter_unseen` отбрасывает записи, чьи id уже в `seen_items` (дедуп).
-4. `services/deepseek.pick_most_relevant` — JSON-режим, возвращает индекс лучшей новости.
+   Свежих нет → **fallback** `storage.published_among`: исключаем только
+   опубликованное, оставляя виденные-но-неопубликованные (хронология может
+   ломаться — это ОК; ручной прогон почти всегда находит что постить).
+4. `services/deepseek.pick_most_relevant` — JSON-режим, возвращает индекс лучшей
+   новости. На вход также идут заголовки опубликованного за сутки
+   (`recent_published_titles`) + инструкция выбирать разнообразно по теме.
 5. `services/deepseek.generate_post` — готовый HTML-пост для Telegram.
 6. `bot.send_message` в канал, затем `storage.mark_seen(candidates, published_id=...)`.
 
 **Дедуп:** в `seen_items` помечаются ВСЕ записи, показанные DeepSeek (не только
 опубликованная) — нет повторов и нет повторной траты токенов на те же заголовки.
 Если публикация упала — выбранная запись НЕ помечается, чтобы повторить позже.
+`no_new` теперь только когда вся лента уже опубликована (см. fallback в п.3).
+`mark_seen` форсит флаг `published` отдельным UPDATE — чтобы повторная публикация
+уже виденной записи (fallback-путь) корректно записалась (один `on_conflict_do_nothing`
+оставил бы старую строку с `published=false`).
 
 ## Архитектура
 
