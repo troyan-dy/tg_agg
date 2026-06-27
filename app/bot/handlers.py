@@ -17,7 +17,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.config import settings
 from app.pipeline import run_once
-from app.storage import get_rss_url, set_rss_url
+from app.storage import get_rss_url, get_stored_rss_url, set_rss_url
 
 log = logging.getLogger("handlers")
 
@@ -87,18 +87,18 @@ def _valid_url(url: str) -> bool:
 async def _save_rss(message: Message, url: str) -> None:
     await set_rss_url(url)
     log.info("Admin set RSS url: %s", url)
-    note = (
-        "\n\n⚠️ Задан <code>RSS_URL</code> в ENV — он перекрывает это значение, "
-        "пока не убран."
-        if settings.rss_url
-        else ""
-    )
-    await message.answer(f"✅ RSS-лента сохранена:\n{url}{note}", reply_markup=main_kb())
+    await message.answer(f"✅ RSS-лента сохранена:\n{url}", reply_markup=main_kb())
+
+
+async def _rss_source_suffix() -> str:
+    """Label the effective feed's origin: DB value (set via chat) wins; the ENV
+    var only kicks in as a fallback when nothing is stored."""
+    return "" if await get_stored_rss_url() else " (из ENV — фолбэк)"
 
 
 async def _show_rss(message: Message) -> None:
     url = await get_rss_url()
-    src = " (из ENV)" if settings.rss_url else ""
+    src = await _rss_source_suffix() if url else ""
     await message.answer(
         f"📡 Текущая лента{src}:\n{url}"
         if url
@@ -109,7 +109,7 @@ async def _show_rss(message: Message) -> None:
 
 async def _show_status(message: Message) -> None:
     url = await get_rss_url()
-    src = " (из ENV)" if settings.rss_url else ""
+    src = await _rss_source_suffix() if url else ""
     await message.answer(
         "📊 <b>Статус</b>\n"
         f"📣 Канал: {settings.channel_id}\n"

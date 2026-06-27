@@ -14,8 +14,9 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
-    # RSS: optional ENV override. If set, wins over the DB value (handy for
-    # local testing — no DB row / no /setrss needed). Empty -> use DB.
+    # RSS: optional fallback feed. The url set via chat (stored in the DB) wins;
+    # this ENV value is used only when nothing is stored (handy for local
+    # testing — no DB row / no /setrss needed). Empty -> rely on the DB.
     rss_url: str = ""
 
     # Storage (PostgreSQL by default)

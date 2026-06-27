@@ -61,9 +61,19 @@ async def test_cmd_setrss_handles_none_args(monkeypatch):
 
 async def test_cmd_rss_shows_url(monkeypatch):
     monkeypatch.setattr(handlers, "get_rss_url", AsyncMock(return_value="https://ex.com/f"))
+    monkeypatch.setattr(handlers, "get_stored_rss_url", AsyncMock(return_value="https://ex.com/f"))
     msg = _message()
     await handlers.cmd_rss(msg)
     assert "https://ex.com/f" in msg.answer.await_args.args[0]
+
+
+async def test_cmd_rss_marks_env_fallback(monkeypatch):
+    # url comes from ENV (nothing stored) -> the reply flags it as a fallback.
+    monkeypatch.setattr(handlers, "get_rss_url", AsyncMock(return_value="https://env/f"))
+    monkeypatch.setattr(handlers, "get_stored_rss_url", AsyncMock(return_value=None))
+    msg = _message()
+    await handlers.cmd_rss(msg)
+    assert "ENV" in msg.answer.await_args.args[0]
 
 
 async def test_cmd_rss_when_unset(monkeypatch):
@@ -126,6 +136,7 @@ async def test_btn_run_delegates_to_run(monkeypatch):
 
 async def test_btn_status_shows_status(monkeypatch):
     monkeypatch.setattr(handlers, "get_rss_url", AsyncMock(return_value="https://ex.com/f"))
+    monkeypatch.setattr(handlers, "get_stored_rss_url", AsyncMock(return_value="https://ex.com/f"))
     msg = _message()
     await handlers.btn_status(msg)
     assert "https://ex.com/f" in msg.answer.await_args.args[0]

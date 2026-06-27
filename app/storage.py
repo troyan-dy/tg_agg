@@ -16,13 +16,18 @@ log = logging.getLogger("storage")
 RSS_KEY = "rss_url"
 
 
-async def get_rss_url() -> str | None:
-    """Effective RSS url: the RSS_URL env override wins, else the stored value."""
-    if settings.rss_url:
-        return settings.rss_url
+async def get_stored_rss_url() -> str | None:
+    """The RSS url stored in the DB (set via chat), or None if unset."""
     async with SessionLocal() as session:
         setting = await session.get(Setting, RSS_KEY)
         return setting.value if setting else None
+
+
+async def get_rss_url() -> str | None:
+    """Effective RSS url: the value set via chat (DB) wins; the RSS_URL env var
+    is only a fallback when nothing is stored (handy for local testing)."""
+    stored = await get_stored_rss_url()
+    return stored or settings.rss_url or None
 
 
 async def set_rss_url(url: str) -> None:

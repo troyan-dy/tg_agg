@@ -28,8 +28,13 @@ async def test_set_rss_url_updates_existing(sqlite_session):
     assert await storage.get_rss_url() == "https://b/feed"
 
 
-async def test_env_override_wins_over_db(sqlite_session, monkeypatch):
+async def test_db_value_wins_over_env(sqlite_session, monkeypatch):
     await storage.set_rss_url("https://from-db/feed")
+    monkeypatch.setattr(storage.settings, "rss_url", "https://from-env/feed")
+    assert await storage.get_rss_url() == "https://from-db/feed"
+
+
+async def test_env_used_as_fallback_when_db_empty(sqlite_session, monkeypatch):
     monkeypatch.setattr(storage.settings, "rss_url", "https://from-env/feed")
     assert await storage.get_rss_url() == "https://from-env/feed"
 
