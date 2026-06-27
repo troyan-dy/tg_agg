@@ -7,13 +7,21 @@ logic; the keyboard just makes the common actions one tap away.
 from __future__ import annotations
 
 import logging
+from typing import cast
 from urllib.parse import urlparse
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
 from app.config import settings
 from app.pipeline import run_once
@@ -31,8 +39,13 @@ from app.storage import (
 log = logging.getLogger("handlers")
 
 router = Router()
-# Only the admin may control the bot.
+# Only the admin may control the bot — both messages and inline-button taps.
 router.message.filter(F.from_user.id == settings.admin_id)
+router.callback_query.filter(F.from_user.id == settings.admin_id)
+
+# Callback-data prefix for the hour toggle grid: "hour:9" toggles 09:00.
+HOUR_CB = "hour:"
+HOURS_DONE_CB = "hours_done"
 
 # --- Keyboard button labels (also matched as incoming text) --------------------
 BTN_RUN = "🚀 Запустить"
@@ -60,25 +73,37 @@ def main_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def cancel_kb(placeholder: str = "Пришли ссылку на ленту…") -> ReplyKeyboardMarkup:
-    """One-button keyboard shown while waiting for input in a dialog."""
+def cancel_kb() -> ReplyKeyboardMarkup:
+    """One-button keyboard shown while waiting for the RSS url."""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=BTN_CANCEL)]],
         resize_keyboard=True,
-        input_field_placeholder=placeholder,
+        input_field_placeholder="Пришли ссылку на ленту…",
     )
+
+
+def hours_inline_kb(selected: set[int]) -> InlineKeyboardMarkup:
+    """24-hour toggle grid: tap an hour to switch publishing on/off for it.
+
+    Enabled hours are marked ✅, disabled ▫️. The last «Готово» row closes the
+    editor. Four columns keep all 24 buttons readable on a phone.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for h in range(24):
+        mark = "✅" if h in selected else "▫️"
+        row.append(InlineKeyboardButton(text=f"{mark} {h:02d}", callback_data=f"{HOUR_CB}{h}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=HOURS_DONE_CB)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 class SetRss(StatesGroup):
     """Conversational flow for the «📝 Сменить ленту» button."""
 
     waiting_for_url = State()
-
-
-class SetHours(StatesGroup):
-    """Conversational flow for the «🕒 Часы» button."""
-
-    waiting_for_hours = State()
 
 
 HELP = (
@@ -91,8 +116,8 @@ HELP = (
     "• 📡 <code>/rss</code> — показать текущую ленту\n"
     "• 📝 <code>/setrss &lt;url&gt;</code> — задать RSS-ленту\n"
     "• 🕒 <code>/hours</code> — показать часы публикации\n"
-    "• 🕒 <code>/sethours 9,13,18</code> — задать часы публикации (в "
-    f"{settings.timezone})\n"
+    "• 🕒 <code>/sethours</code> — сетка часов: тапай, чтобы включать/выключать "
+    f"(в {settings.timezone}); можно и текстом: <code>/sethours 9,13,18</code>\n"
     "• 📊 <code>/status</code> — настройки и расписание\n"
     "• ❓ <code>/help</code> — эта справка"
 )
@@ -143,6 +168,18 @@ async def _show_hours(message: Message) -> None:
         f"🕒 Часы публикации{src}:\n{_fmt_hours(hours)} ({settings.timezone})",
         reply_markup=main_kb(),
     )
+
+
+HOURS_GRID_PROMPT = (
+    "🕒 Часы публикации — тапай по часам, чтобы включать/выключать.\n"
+    "✅ — публикую, ▫️ — нет. Изменения применяются сразу."
+)
+
+
+async def _show_hours_grid(message: Message) -> None:
+    """Open the interactive 0–23 toggle grid seeded with the current hours."""
+    selected = set(await get_run_hours())
+    await message.answer(HOURS_GRID_PROMPT, reply_markup=hours_inline_kb(selected))
 
 
 async def _show_rss(message: Message) -> None:
@@ -234,6 +271,10 @@ async def cmd_hours(message: Message) -> None:
 
 @router.message(Command("sethours"))
 async def cmd_sethours(message: Message, command: CommandObject) -> None:
+    # No args → open the interactive grid; args → parse them directly.
+    if not (command.args or "").strip():
+        await _show_hours_grid(message)
+        return
     try:
         hours = parse_run_hours(command.args or "")
     except ValueError:
@@ -283,37 +324,47 @@ async def btn_help(message: Message) -> None:
     await cmd_help(message)
 
 
-# --- «Часы» conversational flow ------------------------------------------------
+# --- «Часы» toggle grid (inline buttons) ---------------------------------------
 @router.message(F.text == BTN_SETHOURS)
-async def btn_sethours(message: Message, state: FSMContext) -> None:
-    hours = await get_run_hours()
-    src = await _hours_source_suffix()
-    await state.set_state(SetHours.waiting_for_hours)
-    await message.answer(
-        f"🕒 Сейчас публикую в {_fmt_hours(hours)} ({settings.timezone}){src}.\n"
-        "Пришли новые часы через запятую (0–23), напр. <code>9,13,18</code>.",
-        reply_markup=cancel_kb("Напиши часы, напр. 9,13,18…"),
-    )
+async def btn_sethours(message: Message) -> None:
+    await _show_hours_grid(message)
 
 
-@router.message(SetHours.waiting_for_hours, F.text == BTN_CANCEL)
-async def sethours_cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Отменено.", reply_markup=main_kb())
-
-
-@router.message(SetHours.waiting_for_hours)
-async def sethours_receive(message: Message, state: FSMContext) -> None:
-    try:
-        hours = parse_run_hours(message.text or "")
-    except ValueError:
-        await message.answer(
-            "Не понял часы 🤔 Пришли числа 0–23 через запятую, напр. "
-            "<code>9,13,18</code>, или нажми «❌ Отмена»."
-        )
+@router.callback_query(F.data.startswith(HOUR_CB))
+async def cb_toggle_hour(callback: CallbackQuery) -> None:
+    """Toggle one hour on/off, persist, reschedule, and refresh the grid."""
+    if not callback.data:  # data is guaranteed by the filter; narrows for mypy
         return
-    await state.clear()
-    await _save_hours(message, hours)
+    hour = int(callback.data.removeprefix(HOUR_CB))
+    selected = set(await get_run_hours())
+    if hour in selected:
+        if len(selected) == 1:
+            # Never leave an empty schedule — that would silently fall back to ENV.
+            await callback.answer("Должен остаться хотя бы один час", show_alert=True)
+            return
+        selected.discard(hour)
+        toggled_on = False
+    else:
+        selected.add(hour)
+        toggled_on = True
+    await set_run_hours(sorted(selected))
+    await reschedule()
+    if callback.message is not None:
+        await cast(Message, callback.message).edit_reply_markup(
+            reply_markup=hours_inline_kb(selected)
+        )
+    await callback.answer(f"{hour:02d}:00 — {'вкл' if toggled_on else 'выкл'}")
+
+
+@router.callback_query(F.data == HOURS_DONE_CB)
+async def cb_hours_done(callback: CallbackQuery) -> None:
+    """Close the grid: replace it with a plain summary of the saved hours."""
+    hours = await get_run_hours()
+    if callback.message is not None:
+        await cast(Message, callback.message).edit_text(
+            f"🕒 Часы публикации: {_fmt_hours(hours)} ({settings.timezone})"
+        )
+    await callback.answer("Сохранено")
 
 
 # --- «Сменить ленту» conversational flow ---------------------------------------

@@ -127,47 +127,87 @@ async def test_cmd_sethours_rejects_bad_input(monkeypatch):
     assert "0–23" in msg.answer.await_args.args[0]
 
 
-async def test_sethours_receive_saves_valid(monkeypatch):
+async def test_cmd_sethours_no_args_opens_grid(monkeypatch):
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13]))
+    msg = _message()
+    await handlers.cmd_sethours(msg, SimpleNamespace(args=None))
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.InlineKeyboardMarkup)
+
+
+async def test_btn_sethours_opens_grid(monkeypatch):
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13]))
+    msg = _message()
+    await handlers.btn_sethours(msg)
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.InlineKeyboardMarkup)
+
+
+# --- Hours toggle grid (inline keyboard + callbacks) ---------------------------
+def test_hours_inline_kb_marks_selected():
+    kb = handlers.hours_inline_kb({9, 13})
+    texts = [b.text for row in kb.inline_keyboard for b in row]
+    assert "✅ 09" in texts and "✅ 13" in texts
+    assert "▫️ 10" in texts
+    # 24 hour buttons + a final «Готово» row.
+    assert sum("Готово" in t for t in texts) == 1
+
+
+def _callback(data: str):
+    message = SimpleNamespace(edit_reply_markup=AsyncMock(), edit_text=AsyncMock())
+    return SimpleNamespace(data=data, answer=AsyncMock(), message=message)
+
+
+async def test_cb_toggle_hour_enables(monkeypatch):
     set_hours = AsyncMock()
+    resched = AsyncMock()
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13]))
+    monkeypatch.setattr(handlers, "set_run_hours", set_hours)
+    monkeypatch.setattr(handlers, "reschedule", resched)
+    cb = _callback("hour:18")
+
+    await handlers.cb_toggle_hour(cb)
+
+    set_hours.assert_awaited_once_with([9, 13, 18])  # added + sorted
+    resched.assert_awaited_once()
+    cb.message.edit_reply_markup.assert_awaited_once()
+    assert "вкл" in cb.answer.await_args.args[0]
+
+
+async def test_cb_toggle_hour_disables(monkeypatch):
+    set_hours = AsyncMock()
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13]))
     monkeypatch.setattr(handlers, "set_run_hours", set_hours)
     monkeypatch.setattr(handlers, "reschedule", AsyncMock())
-    msg = SimpleNamespace(answer=AsyncMock(), text=" 9, 13 ")
-    state = SimpleNamespace(clear=AsyncMock())
+    cb = _callback("hour:9")
 
-    await handlers.sethours_receive(msg, state)
+    await handlers.cb_toggle_hour(cb)
 
-    state.clear.assert_awaited_once()
-    set_hours.assert_awaited_once_with([9, 13])
+    set_hours.assert_awaited_once_with([13])  # removed
+    assert "выкл" in cb.answer.await_args.args[0]
 
 
-async def test_sethours_receive_rejects_bad(monkeypatch):
+async def test_cb_toggle_hour_keeps_last_one(monkeypatch):
     set_hours = AsyncMock()
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9]))
     monkeypatch.setattr(handlers, "set_run_hours", set_hours)
-    msg = SimpleNamespace(answer=AsyncMock(), text="nope")
-    state = SimpleNamespace(clear=AsyncMock())
+    monkeypatch.setattr(handlers, "reschedule", AsyncMock())
+    cb = _callback("hour:9")
 
-    await handlers.sethours_receive(msg, state)
+    await handlers.cb_toggle_hour(cb)
 
-    set_hours.assert_not_called()
-    state.clear.assert_not_called()  # stay in the waiting state for a retry
+    set_hours.assert_not_called()  # refuse to empty the schedule
+    assert cb.answer.await_args.kwargs.get("show_alert") is True
 
 
-async def test_btn_sethours_enters_waiting_state(monkeypatch):
+async def test_cb_hours_done_closes_grid(monkeypatch):
     monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13]))
-    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=[9, 13]))
-    msg = _message()
-    state = SimpleNamespace(set_state=AsyncMock())
-    await handlers.btn_sethours(msg, state)
-    state.set_state.assert_awaited_once_with(handlers.SetHours.waiting_for_hours)
-    msg.answer.assert_awaited_once()
+    cb = _callback("hours_done")
 
+    await handlers.cb_hours_done(cb)
 
-async def test_sethours_cancel_clears_state():
-    msg = _message()
-    state = SimpleNamespace(clear=AsyncMock())
-    await handlers.sethours_cancel(msg, state)
-    state.clear.assert_awaited_once()
-    assert "Отменено" in msg.answer.await_args.args[0]
+    cb.message.edit_text.assert_awaited_once()
+    assert "09:00" in cb.message.edit_text.await_args.args[0]
 
 
 async def test_cmd_run_reports_posted(monkeypatch):
