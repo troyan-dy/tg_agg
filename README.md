@@ -105,25 +105,50 @@ docker compose logs -f bot
 `DATABASE_URL` для контейнера бота переопределяется в compose на хост `db`,
 так что значение в `.env` для Docker не важно. Остановить: `docker compose down`.
 
+## CI/CD (GitHub Actions)
+
+Пайплайн [.github/workflows/ci.yml](.github/workflows/ci.yml):
+
+- **Job `test`** (на каждый push и PR в `main`): `ruff` → `mypy` → `pytest` через `uv`.
+- **Job `build-push`** (только push в `main`, после зелёных тестов): собирает образ
+  `bot` и пушит в **GHCR** — `ghcr.io/troyan-dy/tg_agg` с тегами `latest` и `<sha>`
+  (sha — для отката на конкретный коммит). Сборка идёт **в Actions, не на сервере**,
+  и **мультиарх** — `linux/amd64` (linux-сервер) + `linux/arm64` (Apple Silicon),
+  через QEMU + buildx. `docker pull` сам выбирает нужную архитектуру.
+
+Сборка использует кэш слоёв GitHub Actions (`type=gha`), так что повторные
+сборки быстрые. Для пуша в GHCR прав хватает встроенного `GITHUB_TOKEN`.
+
 ## Авто-деплой на сервере (cron)
 
-Скрипт [`deploy/auto-update.sh`](deploy/auto-update.sh) раз в несколько минут тянет
-`main` с GitHub и, **только если код изменился**, мягко пересобирает и пересоздаёт
-контейнеры. Пересоздаётся лишь сервис `bot` (старый контейнер гасится через SIGTERM
-с grace-period — long polling останавливается штатно); `db` не трогается, данные
-сохраняются. Если новых коммитов нет — скрипт тихо выходит, ничего не делая.
+Скрипт [`deploy/auto-update.sh`](deploy/auto-update.sh) раз в несколько минут
+**пуллит готовый образ** из GHCR (сборки на сервере больше нет) и поднимает
+[`docker-compose.prod.yml`](docker-compose.prod.yml). Пересоздаётся лишь сервис
+`bot` (старый контейнер гасится через SIGTERM с grace-period — long polling
+останавливается штатно); `db` не трогается, данные сохраняются. Если ни образ,
+ни compose-файл не изменились — скрипт тихо выходит, ничего не делая.
+
+`docker-compose.prod.yml` отличается от dev-овского только сервисом `bot`:
+вместо `build: .` — `image: ghcr.io/troyan-dy/tg_agg:${BOT_TAG:-latest}`
+(можно зафиксировать `BOT_TAG=<sha>` для отката).
 
 ### Предпосылки на сервере
 
 - Установлены **Docker** и плагин **compose**; пользователь добавлен в группу
   `docker` (чтобы `docker compose` работал без `sudo` — иначе cron не сможет).
-- Репозиторий склонирован по **HTTPS** (публичный, ключи не нужны):
+- Репозиторий склонирован по **HTTPS** — на сервере он нужен только ради
+  `docker-compose.prod.yml`, `.env` и самого скрипта (код приезжает образом):
   ```bash
   cd ~ && git clone https://github.com/troyan-dy/tg_agg.git
   cd ~/tg_agg && cp .env.example .env   # заполнить секреты
   ```
-- Первый запуск — вручную: `docker compose up --build -d`. Дальше обновления
-  подхватывает cron.
+- **Доступ к GHCR.** Если пакет приватный — один раз залогиниться (PAT с правом
+  `read:packages`); если сделать пакет публичным в настройках GitHub — логин не нужен:
+  ```bash
+  echo <PAT> | docker login ghcr.io -u troyan-dy --password-stdin
+  ```
+- Первый запуск — вручную: `docker compose -f docker-compose.prod.yml up -d`.
+  Дальше обновления подхватывает cron.
 - Миграции применяются **автоматически на старте** (`alembic upgrade head` в
   `app.main`), отдельный шаг не нужен — на чистой БД схема создаётся сама.
 

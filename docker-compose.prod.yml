@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: tg
+      POSTGRES_PASSWORD: tg
+      POSTGRES_DB: tg_agg
+    ports:
+      # Bind only to the host loopback: psql from the host still works, but the
+      # port is not reachable from the internet (avoids port-scanner noise in logs).
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Check over TCP (-h 127.0.0.1), not the local socket: during first-time
+      # init the official image runs a temporary socket-only server, and a plain
+      # `pg_isready` would report «ready» before the real network listener is up.
+      test: ["CMD-SHELL", "pg_isready -U tg -d tg_agg -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  bot:
+    # Готовый образ из GHCR (собран в CI), а не локальная сборка. Тег можно
+    # переопределить через BOT_TAG (например, sha коммита) для отката.
+    image: ghcr.io/troyan-dy/tg_agg:${BOT_TAG:-latest}
+    env_file: .env
+    environment:
+      # Reach Postgres via the compose service name, not localhost.
+      DATABASE_URL: postgresql+asyncpg://tg:tg@db:5432/tg_agg
+    # Do not start the bot until Postgres passes its healthcheck (accepts TCP
+    # connections) — the bot runs `alembic upgrade head` immediately on startup.
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
