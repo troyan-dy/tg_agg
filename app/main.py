@@ -20,8 +20,17 @@ from app.config import settings
 from app.db import init_db
 from app.pipeline import run_once
 from app.scheduler.worker import build_scheduler
+from app.storage import list_channels
 
 log = logging.getLogger("main")
+
+
+async def _run_all_on_startup(bot: Bot) -> None:
+    """Optional kick-off: run every enabled channel that has a feed configured."""
+    for channel in await list_channels():
+        if channel.enabled and channel.rss_url:
+            result = await run_once(bot, channel)
+            log.info("Startup run for %s: %s", channel.chat_id, result)
 
 
 async def log_incoming(
@@ -43,6 +52,8 @@ async def _set_commands(bot: Bot) -> None:
     """Populate the «/» menu in the admin's chat with friendly labels."""
     commands = [
         BotCommand(command="menu", description="🏠 Меню"),
+        BotCommand(command="channels", description="📺 Каналы"),
+        BotCommand(command="addchannel", description="➕ Добавить канал"),
         BotCommand(command="run", description="🚀 Запустить разбор"),
         BotCommand(command="preview", description="👁 Предпросмотр"),
         BotCommand(command="rss", description="📡 Текущая лента"),
@@ -69,7 +80,7 @@ def _setup_logging() -> None:
 
 async def main() -> None:
     _setup_logging()
-    log.info("Starting bot for channel %s", settings.channel_id)
+    log.info("Starting bot (admin_id=%s)", settings.admin_id)
 
     await init_db()
 
@@ -92,7 +103,7 @@ async def main() -> None:
         log.warning("Could not send startup notice to admin", exc_info=True)
 
     if settings.run_on_startup:
-        asyncio.create_task(run_once(bot))
+        asyncio.create_task(_run_all_on_startup(bot))
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)

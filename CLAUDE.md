@@ -1,40 +1,52 @@
-# tg_agg — RSS-агрегатор для Telegram-канала
+# tg_agg — RSS-агрегатор для Telegram-каналов
 
-Бот ведёт **один** Telegram-канал на автопилоте: несколько раз в день читает RSS,
-через **DeepSeek** выбирает самую актуальную новость, генерирует пост и публикует.
-Управление и настройка — только через личный чат с ботом (доступ у одного админа).
+Бот ведёт **несколько** Telegram-каналов на автопилоте. У каждого канала своя
+RSS-лента, свой тон постов и своё расписание. По расписанию канала бот читает его
+RSS, через **DeepSeek** выбирает самую актуальную новость, генерирует пост в тоне
+канала и публикует. Управление и настройка — только через личный чат с ботом
+(доступ у одного админа). Канал добавляется присланной ссылкой (бот резолвит чат и
+проверяет, что он админ канала с правом публикации).
 
 ## Поток (pipeline)
 
-`app/pipeline.py::run_once` — один прогон:
-1. Берёт RSS-url из БД (`storage.get_rss_url`); нет url → `no_feed`.
+`app/pipeline.py::run_once(bot, channel, ...)` — один прогон ОДНОГО канала:
+1. Берёт `channel.rss_url`; пусто → `no_feed`.
 2. `services/rss.fetch_entries` парсит ленту (feedparser в отдельном потоке), чистит HTML.
-3. `storage.filter_unseen` отбрасывает записи, чьи id уже в `seen_items` (дедуп).
-   Свежих нет → **fallback** `storage.published_among`: исключаем только
-   опубликованное, оставляя виденные-но-неопубликованные (хронология может
-   ломаться — это ОК; ручной прогон почти всегда находит что постить).
+3. `storage.filter_unseen(channel.id, ...)` отбрасывает записи, уже виденные ЭТИМ
+   каналом (дедуп в `seen_items` по составному ключу `(channel_id, entry_id)`).
+   Свежих нет → **fallback** `storage.published_among(channel.id, ...)`: исключаем
+   только опубликованное в этот канал, оставляя виденные-но-неопубликованные
+   (хронология может ломаться — это ОК; ручной прогон почти всегда находит что постить).
 4. `services/deepseek.pick_most_relevant` — JSON-режим, возвращает индекс лучшей
-   новости. На вход также идут заголовки опубликованного за сутки
-   (`recent_published_titles`) + инструкция выбирать разнообразно по теме.
-5. `services/deepseek.generate_post` — готовый HTML-пост для Telegram.
-6. `bot.send_message` в канал, затем `storage.mark_seen(candidates, published_id=...)`.
+   новости. На вход также идут заголовки опубликованного каналом за сутки
+   (`recent_published_titles(channel.id)`) + инструкция выбирать разнообразно по теме.
+5. `services/deepseek.generate_post(chosen, get_preset(channel.tone))` — HTML-пост.
+6. `bot.send_message` в `channel.chat_id`, затем
+   `storage.mark_seen(channel.id, candidates, published_id=...)`.
 
-**Дедуп:** в `seen_items` помечаются ВСЕ записи, показанные DeepSeek (не только
-опубликованная) — нет повторов и нет повторной траты токенов на те же заголовки.
-Если публикация упала — выбранная запись НЕ помечается, чтобы повторить позже.
-`no_new` теперь только когда вся лента уже опубликована (см. fallback в п.3).
-`mark_seen` форсит флаг `published` отдельным UPDATE — чтобы повторная публикация
-уже виденной записи (fallback-путь) корректно записалась (один `on_conflict_do_nothing`
-оставил бы старую строку с `published=false`).
+**Дедуп — по-канальный.** Одна новость может выйти в разные каналы. В `seen_items`
+помечаются ВСЕ записи, показанные DeepSeek (не только опубликованная) — нет повторов
+и нет повторной траты токенов на те же заголовки. Если публикация упала — выбранная
+запись НЕ помечается, чтобы повторить позже. `no_new` только когда вся лента канала
+уже опубликована (см. fallback в п.3). `mark_seen` форсит флаг `published` отдельным
+UPDATE — чтобы повторная публикация уже виденной записи (fallback-путь) корректно
+записалась (один `on_conflict_do_nothing` оставил бы старую строку с `published=false`).
 
 ## Архитектура
 
 - Один процесс (`app/main.py`): aiogram-бот (long polling) + APScheduler в фоне.
-- `app/scheduler/worker.py` — cron по `RUN_HOURS` (часы в `TIMEZONE`), несколько раз в день.
-- `app/bot/handlers.py` — команды `/setrss`, `/rss`, `/run`, `/status`, `/help`.
-  Весь роутер ограничен админом: `router.message.filter(F.from_user.id == settings.admin_id)`.
-- `app/models.py` — `Setting` (key/value, хранит `rss_url`) и `SeenItem` (дедуп).
-- `app/storage.py` — весь доступ к БД (rss-url, filter_unseen, mark_seen).
+- `app/scheduler/worker.py` — **один ежечасный тик** (`CronTrigger(minute=0)` в
+  `TIMEZONE`): берёт текущий час и прогоняет каждый enabled-канал с лентой, у кого
+  этот час в `run_hours`. Расписание читается в момент тика → правка часов канала
+  применяется сразу, без пересборки заданий (`reschedule` больше нет).
+- `app/bot/handlers.py` — каналы (`/channels`, `/addchannel`) + настройки активного
+  канала (`/setrss`, `/sethours`, `/settone`, `/run`, `/preview`, `/status`, ...).
+  «Активный канал» хранится в БД; кнопки-настройки действуют на него. Весь роутер
+  ограничен админом: `router.message.filter(F.from_user.id == settings.admin_id)`.
+- `app/models.py` — `Channel` (канал + его rss_url/tone/run_hours/enabled),
+  `SeenItem` (дедуп, PK `(channel_id, entry_id)`, FK на channels с ON DELETE CASCADE)
+  и `Setting` (key/value, хранит id активного канала).
+- `app/storage.py` — весь доступ к БД: CRUD каналов, выбор активного, по-канальный дедуп.
 - `app/config.py` — pydantic-settings из `.env`.
 
 ## Команды
@@ -49,7 +61,7 @@ docker compose up --build -d     # весь проект (db + bot) в Docker
 
 Быстрый офлайн-smoke-test (без сети/БД), как проверялось раньше:
 ```bash
-BOT_TOKEN=123:abc CHANNEL_ID=@t ADMIN_ID=1 DEEPSEEK_API_KEY=sk-x \
+BOT_TOKEN=123:abc ADMIN_ID=1 DEEPSEEK_API_KEY=sk-x \
   DATABASE_URL='sqlite+aiosqlite:///:memory:' \
   uv run python -c "from app import main, pipeline, storage; from app.services import rss, deepseek; print('OK')"
 ```
@@ -63,7 +75,13 @@ BOT_TOKEN=123:abc CHANNEL_ID=@t ADMIN_ID=1 DEEPSEEK_API_KEY=sk-x \
   `base_url=https://api.deepseek.com`, модель `deepseek-chat`. Это сознательный выбор
   пользователя — не заменять на Anthropic/другого провайдера без запроса.
 - **Таблицы создаются через `db.init_db` (create_all), без Alembic.** Миграций нет —
-  при изменении моделей это учитывать.
+  при изменении моделей это учитывать. Переход на много-канальность сделан **без
+  миграции** (схема `seen_items` сменилась на составной ключ): данные заполняются
+  заново через чат — историческую БД не переносили.
+- **Каналы — только из чата.** В `.env` больше нет `CHANNEL_ID`/`RSS_URL`. Канал
+  добавляется присланной ссылкой; `add_channel` проверять `get_chat` + `get_chat_member`
+  (статус admin/creator и `can_post_messages`). `RUN_HOURS`/`POST_TONE` в env — лишь
+  ДЕФОЛТЫ для нового канала, дальше у каждого канала свои значения в БД.
 - **Docker:** `DATABASE_URL` для сервиса `bot` переопределяется в compose на хост `db`
   (не `localhost`). `.env` обязателен для `docker compose` (env_file), создаётся из
   `.env.example`. `.env` в `.gitignore`.
@@ -75,4 +93,7 @@ BOT_TOKEN=123:abc CHANNEL_ID=@t ADMIN_ID=1 DEEPSEEK_API_KEY=sk-x \
 Стартовали с веб-панели на FastAPI + много-канальность → пользователь упростил до
 **одного канала, управления через чат, захардкоженного админа в env** → затем
 переориентировали в **RSS→DeepSeek→автопостинг** → перевели на **uv** → добавили
-**Docker Compose** для всего. Тенденция пользователя: упрощать, убирать лишнее.
+**Docker Compose** для всего → постепенно вернули **по-канальные настройки**
+(сначала тон/часы как настройки одного канала) → и наконец **снова много-канальность**
+(несколько каналов, у каждого своя лента/тон/расписание, добавление по ссылке).
+То есть прошлое упрощение до одного канала здесь сознательно развёрнуто обратно.

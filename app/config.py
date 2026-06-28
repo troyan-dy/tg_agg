@@ -4,9 +4,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Telegram
+    # Telegram. Channels are managed entirely via chat (DB) now — the bot is
+    # added to a channel by sending its link to the admin, so there is no single
+    # CHANNEL_ID env var anymore. ADMIN_ID is the one user allowed to control it.
     bot_token: str
-    channel_id: str
     admin_id: int
 
     # DeepSeek (OpenAI-compatible API)
@@ -14,18 +15,15 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
-    # RSS: optional fallback feed. The url set via chat (stored in the DB) wins;
-    # this ENV value is used only when nothing is stored (handy for local
-    # testing — no DB row / no /setrss needed). Empty -> rely on the DB.
-    rss_url: str = ""
-
     # Storage (PostgreSQL by default)
     database_url: str = "postgresql+asyncpg://tg:tg@localhost:5432/tg_agg"
 
     # Logging
     log_level: str = "INFO"
 
-    # Scheduler: hours of the day (server TIMEZONE) to run the pipeline
+    # Scheduler: timezone the run hours are interpreted in. run_hours / post_tone
+    # below are only the DEFAULTS seeded into a newly added channel; each channel
+    # then keeps its own schedule and tone in the DB.
     timezone: str = "UTC"
     run_hours: str = "9,13,18"
     run_on_startup: bool = False
@@ -33,8 +31,7 @@ class Settings(BaseSettings):
     # Pipeline tuning
     max_candidates: int = 20  # newest unseen entries shown to DeepSeek
     post_language: str = "русском"
-    # Default post tone (a key from app.tone.TONES). Fallback only: the value set
-    # via chat (DB) wins. Unknown keys fall back to the default tone.
+    # Default post tone (a key from app.tone.TONES) for a newly added channel.
     post_tone: str = "news"
 
     @property

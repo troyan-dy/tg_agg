@@ -6,15 +6,15 @@ import logging
 from aiogram import Bot
 
 from app.config import settings
+from app.models import Channel
 from app.services import deepseek, rss
 from app.storage import (
     filter_unseen,
-    get_rss_url,
-    get_tone_preset,
     mark_seen,
     published_among,
     recent_published_titles,
 )
+from app.tone import get_preset
 
 log = logging.getLogger("pipeline")
 
@@ -50,18 +50,19 @@ class RunResult:
 
 
 async def run_once(
-    bot: Bot, *, chat_id: int | str | None = None, persist: bool = True
+    bot: Bot, channel: Channel, *, chat_id: int | str | None = None, persist: bool = True
 ) -> RunResult:
-    """One pipeline run.
+    """One pipeline run for a single channel.
 
-    chat_id — where to send the post; defaults to the channel.
+    channel — whose feed/tone/target to use, and what dedup is scoped to.
+    chat_id — where to send the post; defaults to the channel's chat_id.
     persist — whether to mark evaluated entries as seen. Set False for a
         preview/dry-run so it stays repeatable and touches nothing in the DB.
     """
-    target = chat_id if chat_id is not None else settings.channel_id
-    url = await get_rss_url()
+    target = chat_id if chat_id is not None else channel.chat_id
+    url = channel.rss_url
     if not url:
-        log.info("No RSS url configured")
+        log.info("Channel %s has no RSS url configured", channel.id)
         return RunResult("no_feed", "RSS-ссылка не задана. Установи её: /setrss <url>")
 
     entries = await rss.fetch_entries(url, limit=max(settings.max_candidates * 2, 50))
@@ -69,13 +70,13 @@ async def run_once(
         return RunResult("no_new", "Лента пуста или недоступна.")
 
     ids = [e["id"] for e in entries]
-    unseen_ids = await filter_unseen(ids)
+    unseen_ids = await filter_unseen(channel.id, ids)
     candidates = [e for e in entries if e["id"] in unseen_ids][: settings.max_candidates]
     if not candidates:
         # No fresh entries. Rather than give up, re-surface entries already seen
         # but never published (may break chronological order — acceptable here),
         # so a manual run still has something to post.
-        published_ids = await published_among(ids)
+        published_ids = await published_among(channel.id, ids)
         candidates = [e for e in entries if e["id"] not in published_ids][
             : settings.max_candidates
         ]
@@ -85,7 +86,7 @@ async def run_once(
         log.info("Nothing to post — every feed entry is already published")
         return RunResult("no_new", "В ленте нет ничего, что ещё не было опубликовано.")
 
-    recent = await recent_published_titles()
+    recent = await recent_published_titles(channel.id)
     log.info(
         "%d new candidates, %d posted in last 24h, asking DeepSeek to pick",
         len(candidates), len(recent),
@@ -94,17 +95,17 @@ async def run_once(
     chosen = candidates[index]
 
     try:
-        tone = await get_tone_preset()
+        tone = get_preset(channel.tone)
         text = await deepseek.generate_post(chosen, tone)
         await _publish(bot, target, text, chosen.get("image", ""))
     except Exception as exc:  # noqa: BLE001
         log.exception("Publishing failed")
         # Mark the rest as seen but NOT the failed one, so we can retry it later.
         if persist:
-            await mark_seen([c for c in candidates if c["id"] != chosen["id"]])
+            await mark_seen(channel.id, [c for c in candidates if c["id"] != chosen["id"]])
         return RunResult("error", str(exc))
 
     if persist:
-        await mark_seen(candidates, published_id=chosen["id"])
-    log.info("Posted: %s", chosen["title"])
+        await mark_seen(channel.id, candidates, published_id=chosen["id"])
+    log.info("Posted to %s: %s", channel.chat_id, chosen["title"])
     return RunResult("posted", chosen["title"])
