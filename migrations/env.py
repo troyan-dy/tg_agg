@@ -19,7 +19,10 @@ from app.models import Channel, SeenItem, Setting  # noqa: F401  (register table
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: when migrations run inside the app process
+    # (app.main → run_migrations on startup) the app's own loggers already exist;
+    # the fileConfig default would mark them disabled and silence the bot's logs.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

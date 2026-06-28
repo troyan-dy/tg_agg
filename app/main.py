@@ -62,6 +62,9 @@ def _setup_logging() -> None:
     logging.basicConfig(
         level=settings.log_level.upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        # force=True so a second call (after Alembic's fileConfig swaps the root
+        # handler/level during migrations) actually re-applies our config.
+        force=True,
     )
     # Quiet down noisy third-party loggers; keep our own at the configured level.
     for noisy in ("aiogram.event", "apscheduler", "httpx", "httpcore", "openai"):
@@ -73,6 +76,11 @@ async def main() -> None:
     log.info("Starting bot (admin_id=%s)", settings.admin_id)
 
     await run_migrations()
+    # Alembic's env.py calls fileConfig(), which resets the root logger to
+    # WARNING with its own format. Re-apply our config so the bot's INFO logs
+    # are visible for the rest of the process (otherwise only migration output
+    # shows up in the container logs).
+    _setup_logging()
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     # DB-backed FSM storage so a restart never drops a half-finished input flow.
