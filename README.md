@@ -190,6 +190,22 @@ uv run alembic check             # проверить, что модели и м
 URL базы и metadata берутся из `app.config`/`app.models` (`migrations/env.py`), а не
 из `alembic.ini` — секретов в ini нет.
 
+### Проверки (тесты, линтеры, типы)
+
+Все технические проверки одной командой ([Makefile](Makefile)):
+
+```bash
+make check        # ruff → mypy → pytest (останавливается на первой ошибке)
+```
+
+Отдельные цели, если нужно прогнать что-то одно:
+
+```bash
+make lint         # uv run ruff check .
+make types        # uv run mypy
+make test         # uv run pytest -q (покрытие включено, падает ниже порога)
+```
+
 ### Подготовка
 
 1. Бот у [@BotFather](https://t.me/BotFather) → `BOT_TOKEN`.
