@@ -1,4 +1,4 @@
-"""Tests for the bot command handlers (called directly, sans aiogram dispatch)."""
+"""Tests for the bot handlers (called directly, sans aiogram dispatch)."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -15,11 +15,11 @@ from app.pipeline import RunResult
 def _channel(
     *, id: int = 1, chat_id: str = "@chan", title: str | None = "Chan",
     rss_url: str | None = "https://ex.com/f", tone: str = "news", run_hours: str = "9,13,18",
-    enabled: bool = True,
+    enabled: bool = True, require_media: bool = False,
 ) -> Channel:
     return Channel(
         id=id, chat_id=chat_id, title=title, rss_url=rss_url,
-        tone=tone, run_hours=run_hours, enabled=enabled,
+        tone=tone, run_hours=run_hours, enabled=enabled, require_media=require_media,
     )
 
 
@@ -27,11 +27,8 @@ def _message(text: str | None = None):
     return SimpleNamespace(text=text, answer=AsyncMock())
 
 
-def _callback(data: str):
-    message = SimpleNamespace(
-        edit_reply_markup=AsyncMock(), edit_text=AsyncMock(), answer=AsyncMock()
-    )
-    return SimpleNamespace(data=data, answer=AsyncMock(), message=message)
+def _kb_texts(kb) -> set[str]:
+    return {b.text for row in kb.keyboard for b in row}
 
 
 def _select(monkeypatch, channel: Channel | None):
@@ -151,6 +148,7 @@ async def test_try_add_channel_duplicate(monkeypatch):
     monkeypatch.setattr(
         handlers, "get_channel_by_chat", AsyncMock(return_value=_channel())
     )
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     add = AsyncMock()
     monkeypatch.setattr(handlers, "add_channel", add)
     msg = _message()
@@ -174,7 +172,7 @@ async def test_try_add_channel_unresolvable(monkeypatch):
     assert "Не нашёл" in msg.answer.await_args.args[0]
 
 
-# --- Channels list / select / delete -------------------------------------------
+# --- Channels list / select ----------------------------------------------------
 async def test_show_channels_lists(monkeypatch):
     chans = [_channel(id=1, title="A"), _channel(id=2, title="B")]
     monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=chans))
@@ -183,11 +181,10 @@ async def test_show_channels_lists(monkeypatch):
 
     await handlers._show_channels(msg)
 
-    # Screen 1 is now a reply keyboard: one button per channel + «add».
+    # Screen 1 is a reply keyboard: one button per channel + «add».
     kb = msg.answer.await_args.kwargs["reply_markup"]
     assert isinstance(kb, handlers.ReplyKeyboardMarkup)
-    texts = {b.text for row in kb.keyboard for b in row}
-    assert {"A", "B", handlers.BTN_ADDCHANNEL} <= texts
+    assert {"A", "B", handlers.BTN_ADDCHANNEL} <= _kb_texts(kb)
 
 
 async def test_show_channels_empty(monkeypatch):
@@ -210,35 +207,10 @@ async def test_tap_channel_opens_settings(monkeypatch):
     sel.assert_awaited_once_with(3)
     kb = msg.answer.await_args.kwargs["reply_markup"]
     assert isinstance(kb, handlers.ReplyKeyboardMarkup)
-    assert handlers.BTN_BACK in {b.text for row in kb.keyboard for b in row}
+    assert handlers.BTN_BACK in _kb_texts(kb)
 
 
-async def test_cb_delete_no_cancels(monkeypatch):
-    cb = _callback(handlers.CH_DELNO_CB)
-
-    await handlers.cb_delete_channel_no(cb)
-
-    cb.message.edit_text.assert_awaited_once()
-    assert "не удалён" in cb.message.edit_text.await_args.args[0]
-
-
-async def test_cb_delete_yes_deletes(monkeypatch):
-    ch = _channel(id=4, title="D")
-    monkeypatch.setattr(handlers, "get_channel", AsyncMock(return_value=ch))
-    dele = AsyncMock()
-    monkeypatch.setattr(handlers, "delete_channel", dele)
-    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
-    _select(monkeypatch, None)
-    cb = _callback("chdelyes:4")
-
-    await handlers.cb_delete_channel_yes(cb)
-
-    dele.assert_awaited_once_with(4)
-    # Keyboard is resynced after deletion (no channels left → home keyboard).
-    cb.message.answer.assert_awaited_once()
-
-
-# --- Two-screen navigation: back / toggle / delete -----------------------------
+# --- Two-screen navigation: back / toggle / media ------------------------------
 async def test_btn_back_shows_channels(monkeypatch):
     monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     _select(monkeypatch, None)
@@ -246,10 +218,9 @@ async def test_btn_back_shows_channels(monkeypatch):
 
     await handlers.btn_back(msg)
 
-    # First message carries the top-level (home) keyboard.
     kb = msg.answer.await_args_list[0].kwargs["reply_markup"]
     assert isinstance(kb, handlers.ReplyKeyboardMarkup)
-    labels = {b.text for row in kb.keyboard for b in row}
+    labels = _kb_texts(kb)
     assert handlers.BTN_ADDCHANNEL in labels and handlers.BTN_BACK not in labels
 
 
@@ -264,9 +235,24 @@ async def test_btn_toggle_flips_enabled(monkeypatch):
     upd.assert_awaited_once_with(1, enabled=False)
     kb = msg.answer.await_args.kwargs["reply_markup"]
     # Now disabled → keyboard offers the «enable» label.
-    assert handlers.BTN_ENABLE in {b.text for row in kb.keyboard for b in row}
+    assert handlers.BTN_ENABLE in _kb_texts(kb)
 
 
+async def test_btn_toggle_media_turns_on(monkeypatch):
+    _select(monkeypatch, _channel(id=2, require_media=False))
+    upd = AsyncMock()
+    monkeypatch.setattr(handlers, "update_channel", upd)
+    msg = _message()
+
+    await handlers.btn_toggle_media(msg)
+
+    upd.assert_awaited_once_with(2, require_media=True)
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    # Filter is now on → keyboard offers the «allow text» label to turn it off.
+    assert handlers.BTN_MEDIA_ANY in _kb_texts(kb)
+
+
+# --- Delete (reply-keyboard confirmation) --------------------------------------
 async def test_btn_delete_asks_confirmation(monkeypatch):
     _select(monkeypatch, _channel(id=7, title="G"))
     msg = _message()
@@ -274,16 +260,41 @@ async def test_btn_delete_asks_confirmation(monkeypatch):
     await handlers.btn_delete(msg)
 
     kb = msg.answer.await_args.kwargs["reply_markup"]
-    assert isinstance(kb, handlers.InlineKeyboardMarkup)
-    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert f"{handlers.CH_DELYES_CB}7" in cbs
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
+    assert handlers.BTN_DELYES in _kb_texts(kb)
+
+
+async def test_btn_delete_yes_deletes(monkeypatch):
+    _select(monkeypatch, _channel(id=4, title="D"))
+    dele = AsyncMock()
+    monkeypatch.setattr(handlers, "delete_channel", dele)
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
+    msg = _message()
+
+    await handlers.btn_delete_yes(msg)
+
+    dele.assert_awaited_once_with(4)
+    # Back to the home keyboard after deletion.
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert handlers.BTN_ADDCHANNEL in _kb_texts(kb)
+
+
+async def test_btn_delete_no_cancels(monkeypatch):
+    _select(monkeypatch, _channel(id=4, title="D"))
+    msg = _message()
+
+    await handlers.btn_delete_no(msg)
+
+    assert "не удалён" in msg.answer.await_args.args[0]
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert handlers.BTN_BACK in _kb_texts(kb)
 
 
 # --- Add-channel FSM -----------------------------------------------------------
-async def test_start_add_channel_sets_state():
+async def test_btn_addchannel_sets_state():
     msg = _message()
     state = SimpleNamespace(set_state=AsyncMock())
-    await handlers._start_add_channel(msg, state)
+    await handlers.btn_addchannel(msg, state)
     state.set_state.assert_awaited_once_with(handlers.AddChannel.waiting_for_link)
 
 
@@ -303,7 +314,9 @@ async def test_addchannel_receive_calls_try(monkeypatch):
     assert seen["raw"] == "@chan"
 
 
-async def test_addchannel_cancel_clears_state():
+async def test_addchannel_cancel_clears_state(monkeypatch):
+    _select(monkeypatch, None)
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     msg = _message()
     state = SimpleNamespace(clear=AsyncMock())
     await handlers.addchannel_cancel(msg, state)
@@ -312,86 +325,35 @@ async def test_addchannel_cancel_clears_state():
 
 
 # --- RSS -----------------------------------------------------------------------
-async def test_cmd_setrss_rejects_bad_url(monkeypatch):
-    upd = AsyncMock()
-    monkeypatch.setattr(handlers, "update_channel", upd)
-    msg = _message()
-    await handlers.cmd_setrss(msg, SimpleNamespace(args="garbage"))
-    upd.assert_not_called()
-    assert "корректный URL" in msg.answer.await_args.args[0]
-
-
-async def test_cmd_setrss_saves_valid_url(monkeypatch):
-    _select(monkeypatch, _channel(id=1))
-    upd = AsyncMock()
-    monkeypatch.setattr(handlers, "update_channel", upd)
-    msg = _message()
-    await handlers.cmd_setrss(msg, SimpleNamespace(args="  https://ex.com/feed  "))
-    upd.assert_awaited_once_with(1, rss_url="https://ex.com/feed")
-
-
-async def test_cmd_setrss_handles_none_args(monkeypatch):
-    monkeypatch.setattr(handlers, "update_channel", AsyncMock())
-    msg = _message()
-    await handlers.cmd_setrss(msg, SimpleNamespace(args=None))
-    assert "корректный URL" in msg.answer.await_args.args[0]
-
-
-async def test_cmd_rss_shows_url(monkeypatch):
+async def test_show_rss_shows_url(monkeypatch):
     _select(monkeypatch, _channel(rss_url="https://ex.com/f"))
     msg = _message()
-    await handlers.cmd_rss(msg)
+    await handlers._show_rss(msg)
     assert "https://ex.com/f" in msg.answer.await_args.args[0]
 
 
-async def test_cmd_rss_when_unset(monkeypatch):
+async def test_show_rss_when_unset(monkeypatch):
     _select(monkeypatch, _channel(rss_url=None))
     msg = _message()
-    await handlers.cmd_rss(msg)
+    await handlers._show_rss(msg)
     assert "не задана" in msg.answer.await_args.args[0]
 
 
-async def test_cmd_rss_without_channel_nudges(monkeypatch):
+async def test_show_rss_without_channel_nudges(monkeypatch):
     _select(monkeypatch, None)
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     msg = _message()
-    await handlers.cmd_rss(msg)
+    await handlers._show_rss(msg)
     assert "добавь канал" in msg.answer.await_args.args[0].lower()
 
 
-# --- Hours ---------------------------------------------------------------------
-async def test_cmd_hours_shows_schedule(monkeypatch):
-    _select(monkeypatch, _channel(run_hours="9,13,18"))
-    msg = _message()
-    await handlers.cmd_hours(msg)
-    out = msg.answer.await_args.args[0]
-    assert "09:00" in out and "13:00" in out and "18:00" in out
-
-
-async def test_cmd_sethours_saves(monkeypatch):
-    _select(monkeypatch, _channel(id=1))
-    upd = AsyncMock()
-    monkeypatch.setattr(handlers, "update_channel", upd)
-    msg = _message()
-    await handlers.cmd_sethours(msg, SimpleNamespace(args="18,9,9"))
-    upd.assert_awaited_once_with(1, run_hours="9,18")  # parsed, sorted, deduped
-    assert "09:00" in msg.answer.await_args.args[0]
-
-
-async def test_cmd_sethours_rejects_bad_input(monkeypatch):
-    upd = AsyncMock()
-    monkeypatch.setattr(handlers, "update_channel", upd)
-    msg = _message()
-    await handlers.cmd_sethours(msg, SimpleNamespace(args="25,foo"))
-    upd.assert_not_called()
-    assert "0–23" in msg.answer.await_args.args[0]
-
-
-async def test_cmd_sethours_no_args_opens_grid(monkeypatch):
-    _select(monkeypatch, _channel())
-    msg = _message()
-    await handlers.cmd_sethours(msg, SimpleNamespace(args=None))
-    kb = msg.answer.await_args.kwargs["reply_markup"]
-    assert isinstance(kb, handlers.InlineKeyboardMarkup)
+# --- Hours (reply-keyboard toggle grid) ----------------------------------------
+def test_hours_reply_kb_marks_selected():
+    kb = handlers.hours_reply_kb({9, 13})
+    texts = _kb_texts(kb)
+    assert "✅ 09" in texts and "✅ 13" in texts
+    assert "▫️ 10" in texts
+    assert handlers.BTN_DONE in texts
 
 
 async def test_btn_sethours_opens_grid(monkeypatch):
@@ -399,102 +361,79 @@ async def test_btn_sethours_opens_grid(monkeypatch):
     msg = _message()
     await handlers.btn_sethours(msg)
     kb = msg.answer.await_args.kwargs["reply_markup"]
-    assert isinstance(kb, handlers.InlineKeyboardMarkup)
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
+    assert handlers.BTN_DONE in _kb_texts(kb)
 
 
-def test_hours_inline_kb_marks_selected():
-    kb = handlers.hours_inline_kb({9, 13})
-    texts = [b.text for row in kb.inline_keyboard for b in row]
-    assert "✅ 09" in texts and "✅ 13" in texts
-    assert "▫️ 10" in texts
-    assert sum("Готово" in t for t in texts) == 1
-
-
-async def test_cb_toggle_hour_enables(monkeypatch):
+async def test_btn_toggle_hour_enables(monkeypatch):
     _select(monkeypatch, _channel(id=1, run_hours="9,13"))
     upd = AsyncMock()
     monkeypatch.setattr(handlers, "update_channel", upd)
-    cb = _callback("hour:18")
+    msg = _message(text="▫️ 18")
 
-    await handlers.cb_toggle_hour(cb)
+    await handlers.btn_toggle_hour(msg)
 
     upd.assert_awaited_once_with(1, run_hours="9,13,18")
-    cb.message.edit_reply_markup.assert_awaited_once()
-    assert "вкл" in cb.answer.await_args.args[0]
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
 
 
-async def test_cb_toggle_hour_disables(monkeypatch):
+async def test_btn_toggle_hour_disables(monkeypatch):
     _select(monkeypatch, _channel(id=1, run_hours="9,13"))
     upd = AsyncMock()
     monkeypatch.setattr(handlers, "update_channel", upd)
-    cb = _callback("hour:9")
+    msg = _message(text="✅ 09")
 
-    await handlers.cb_toggle_hour(cb)
+    await handlers.btn_toggle_hour(msg)
 
     upd.assert_awaited_once_with(1, run_hours="13")
-    assert "выкл" in cb.answer.await_args.args[0]
 
 
-async def test_cb_toggle_hour_keeps_last_one(monkeypatch):
+async def test_btn_toggle_hour_keeps_last_one(monkeypatch):
     _select(monkeypatch, _channel(id=1, run_hours="9"))
     upd = AsyncMock()
     monkeypatch.setattr(handlers, "update_channel", upd)
-    cb = _callback("hour:9")
+    msg = _message(text="✅ 09")
 
-    await handlers.cb_toggle_hour(cb)
+    await handlers.btn_toggle_hour(msg)
 
     upd.assert_not_called()
-    assert cb.answer.await_args.kwargs.get("show_alert") is True
+    assert "хотя бы один" in msg.answer.await_args.args[0]
 
 
-async def test_cb_toggle_hour_without_channel(monkeypatch):
+async def test_btn_toggle_hour_without_channel(monkeypatch):
     _select(monkeypatch, None)
-    cb = _callback("hour:9")
-    await handlers.cb_toggle_hour(cb)
-    assert cb.answer.await_args.kwargs.get("show_alert") is True
-
-
-async def test_cb_hours_done_closes_grid(monkeypatch):
-    _select(monkeypatch, _channel(run_hours="9,13"))
-    cb = _callback("hours_done")
-    await handlers.cb_hours_done(cb)
-    cb.message.edit_text.assert_awaited_once()
-    assert "09:00" in cb.message.edit_text.await_args.args[0]
-
-
-# --- Tone ----------------------------------------------------------------------
-async def test_cmd_tone_shows_current(monkeypatch):
-    _select(monkeypatch, _channel(tone="expert"))
-    msg = _message()
-    await handlers.cmd_tone(msg)
-    assert "Экспертный" in msg.answer.await_args.args[0]
-
-
-async def test_cmd_settone_no_args_opens_grid(monkeypatch):
-    _select(monkeypatch, _channel(tone="news"))
-    msg = _message()
-    await handlers.cmd_settone(msg, SimpleNamespace(args=None))
-    kb = msg.answer.await_args.kwargs["reply_markup"]
-    assert isinstance(kb, handlers.InlineKeyboardMarkup)
-
-
-async def test_cmd_settone_text_applies(monkeypatch):
-    _select(monkeypatch, _channel(id=1))
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     upd = AsyncMock()
     monkeypatch.setattr(handlers, "update_channel", upd)
-    msg = _message()
-    await handlers.cmd_settone(msg, SimpleNamespace(args="  EXPERT "))
-    upd.assert_awaited_once_with(1, tone="expert")  # lowercased
-    assert "Экспертный" in msg.answer.await_args.args[0]
+    msg = _message(text="✅ 09")
 
+    await handlers.btn_toggle_hour(msg)
 
-async def test_cmd_settone_rejects_unknown(monkeypatch):
-    upd = AsyncMock()
-    monkeypatch.setattr(handlers, "update_channel", upd)
-    msg = _message()
-    await handlers.cmd_settone(msg, SimpleNamespace(args="bogus"))
     upd.assert_not_called()
-    assert "пресет" in msg.answer.await_args.args[0]
+
+
+async def test_btn_editor_done_returns_to_channel(monkeypatch):
+    _select(monkeypatch, _channel(id=1, title="C"))
+    msg = _message()
+    await handlers.btn_editor_done(msg)
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
+    assert handlers.BTN_BACK in _kb_texts(kb)
+
+
+# --- Tone (reply-keyboard picker) ----------------------------------------------
+def test_tone_reply_kb_marks_current():
+    kb = handlers.tone_reply_kb("expert")
+    texts = _kb_texts(kb)
+    assert any(t.startswith("✅") and "Экспертный" in t for t in texts)
+    assert handlers.BTN_DONE in texts
+
+
+def test_tone_btn_texts_map_both_variants():
+    # Both the plain and the active (✅) caption resolve back to the preset key.
+    assert handlers.TONE_BTN_TEXTS[handlers._tone_btn_text("hype", False)] == "hype"
+    assert handlers.TONE_BTN_TEXTS[handlers._tone_btn_text("hype", True)] == "hype"
 
 
 async def test_btn_tone_opens_grid(monkeypatch):
@@ -502,45 +441,21 @@ async def test_btn_tone_opens_grid(monkeypatch):
     msg = _message()
     await handlers.btn_tone(msg)
     kb = msg.answer.await_args.kwargs["reply_markup"]
-    assert isinstance(kb, handlers.InlineKeyboardMarkup)
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
+    assert handlers.BTN_DONE in _kb_texts(kb)
 
 
-def test_tone_inline_kb_marks_current():
-    kb = handlers.tone_inline_kb("expert")
-    texts = [b.text for row in kb.inline_keyboard for b in row]
-    assert any(t.startswith("✅") and "Экспертный" in t for t in texts)
-    assert sum("Готово" in t for t in texts) == 1
-
-
-async def test_cb_select_tone_persists(monkeypatch):
+async def test_btn_select_tone_persists(monkeypatch):
     _select(monkeypatch, _channel(id=1))
     upd = AsyncMock()
     monkeypatch.setattr(handlers, "update_channel", upd)
-    cb = _callback("tone:hype")
+    msg = _message(text=handlers._tone_btn_text("hype", False))
 
-    await handlers.cb_select_tone(cb)
+    await handlers.btn_select_tone(msg)
 
     upd.assert_awaited_once_with(1, tone="hype")
-    cb.message.edit_reply_markup.assert_awaited_once()
-
-
-async def test_cb_select_tone_ignores_unknown(monkeypatch):
-    _select(monkeypatch, _channel(id=1))
-    upd = AsyncMock()
-    monkeypatch.setattr(handlers, "update_channel", upd)
-    cb = _callback("tone:bogus")
-
-    await handlers.cb_select_tone(cb)
-
-    upd.assert_not_called()
-
-
-async def test_cb_tone_done_closes_picker(monkeypatch):
-    _select(monkeypatch, _channel(tone="digest"))
-    cb = _callback("tone_done")
-    await handlers.cb_tone_done(cb)
-    cb.message.edit_text.assert_awaited_once()
-    assert "Тезисный" in cb.message.edit_text.await_args.args[0]
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
 
 
 # --- Status / startup ----------------------------------------------------------
@@ -590,38 +505,39 @@ async def test_btn_status_shows_status(monkeypatch):
 
 
 # --- Run / preview -------------------------------------------------------------
-async def test_cmd_run_reports_posted(monkeypatch):
+async def test_btn_run_reports_posted(monkeypatch):
     _select(monkeypatch, _channel())
     monkeypatch.setattr(
         handlers, "run_once", AsyncMock(return_value=RunResult("posted", "Заголовок"))
     )
     msg = _message()
 
-    await handlers.cmd_run(msg, AsyncMock())
+    await handlers.btn_run(msg, AsyncMock())
 
     assert msg.answer.await_count == 2  # "starting" then result
     assert "Заголовок" in msg.answer.await_args_list[-1].args[0]
 
 
-async def test_cmd_run_without_channel(monkeypatch):
+async def test_btn_run_without_channel(monkeypatch):
     _select(monkeypatch, None)
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     run = AsyncMock()
     monkeypatch.setattr(handlers, "run_once", run)
     msg = _message()
-    await handlers.cmd_run(msg, AsyncMock())
+    await handlers.btn_run(msg, AsyncMock())
     run.assert_not_called()
     assert "добавь канал" in msg.answer.await_args.args[0].lower()
 
 
-async def test_cmd_run_reports_error(monkeypatch):
+async def test_btn_run_reports_error(monkeypatch):
     _select(monkeypatch, _channel())
     monkeypatch.setattr(handlers, "run_once", AsyncMock(return_value=RunResult("error", "boom")))
     msg = _message()
-    await handlers.cmd_run(msg, AsyncMock())
+    await handlers.btn_run(msg, AsyncMock())
     assert "boom" in msg.answer.await_args_list[-1].args[0]
 
 
-async def test_cmd_preview_runs_dry(monkeypatch):
+async def test_btn_preview_runs_dry(monkeypatch):
     ch = _channel()
     _select(monkeypatch, ch)
     run = AsyncMock(return_value=RunResult("posted", "Заголовок"))
@@ -630,31 +546,24 @@ async def test_cmd_preview_runs_dry(monkeypatch):
     msg = _message()
     bot = AsyncMock()
 
-    await handlers.cmd_preview(msg, bot)
+    await handlers.btn_preview(msg, bot)
 
     run.assert_awaited_once_with(bot, ch, chat_id=777, persist=False)
     assert msg.answer.await_count == 2  # "starting" + summary
 
 
-async def test_cmd_help_answers():
+async def test_cmd_start_answers(monkeypatch):
+    _select(monkeypatch, None)
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     msg = _message()
-    await handlers.cmd_help(msg)
+    await handlers.cmd_start(msg)
     msg.answer.assert_awaited_once()
-
-
-async def test_btn_run_delegates_to_run(monkeypatch):
-    _select(monkeypatch, _channel())
-    monkeypatch.setattr(
-        handlers, "run_once", AsyncMock(return_value=RunResult("posted", "Заголовок"))
-    )
-    msg = _message()
-    await handlers.btn_run(msg, AsyncMock())
-    assert "Заголовок" in msg.answer.await_args_list[-1].args[0]
 
 
 # --- Set-RSS FSM ---------------------------------------------------------------
 async def test_btn_setrss_requires_channel(monkeypatch):
     _select(monkeypatch, None)
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     msg = _message()
     state = SimpleNamespace(set_state=AsyncMock())
     await handlers.btn_setrss(msg, state)
@@ -695,7 +604,9 @@ async def test_setrss_receive_rejects_bad_url(monkeypatch):
     state.clear.assert_not_called()  # stay waiting for a retry
 
 
-async def test_setrss_cancel_clears_state():
+async def test_setrss_cancel_clears_state(monkeypatch):
+    _select(monkeypatch, None)
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
     msg = _message()
     state = SimpleNamespace(clear=AsyncMock())
     await handlers.setrss_cancel(msg, state)
@@ -703,7 +614,9 @@ async def test_setrss_cancel_clears_state():
     assert "Отменено" in msg.answer.await_args.args[0]
 
 
-async def test_fallback_answers():
-    msg = _message()
+async def test_fallback_answers(monkeypatch):
+    _select(monkeypatch, None)
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
+    msg = _message(text="что-то непонятное")
     await handlers.fallback(msg)
     msg.answer.assert_awaited_once()

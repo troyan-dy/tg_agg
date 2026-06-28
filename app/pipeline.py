@@ -4,6 +4,13 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot
+from aiogram.types import (
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaLivePhoto,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 
 from app.config import settings
 from app.models import Channel
@@ -20,23 +27,60 @@ log = logging.getLogger("pipeline")
 
 # Telegram caps photo captions at 1024 chars; plain messages allow more.
 _CAPTION_LIMIT = 1024
+# Telegram allows at most 10 items in a media group.
+_MEDIA_GROUP_LIMIT = 10
 
 
-async def _publish(bot: Bot, target: int | str, text: str, image: str) -> None:
-    """Send the post, attaching the article image when there is one.
+def _has_media(entry: dict) -> bool:
+    """Whether an entry carries an image or a video (used by require_media)."""
+    return bool(entry.get("images") or entry.get("image") or entry.get("video"))
 
-    If the post is longer than a photo caption allows, the image goes first as
-    its own message and the full text follows, so nothing gets truncated.
+
+async def _publish(
+    bot: Bot,
+    target: int | str,
+    text: str,
+    images: list[str] | None = None,
+    video: str = "",
+) -> None:
+    """Send the post, attaching the article media when there is any.
+
+    A single image rides as a photo (with the text as caption when short
+    enough). Several images go out as one media group (gallery). A video is sent
+    as a video. When the text is longer than a caption allows, the media goes
+    first on its own and the full text follows, so nothing gets truncated. Any
+    media failure degrades gracefully to a plain text message.
     """
-    if image:
-        try:
-            if len(text) <= _CAPTION_LIMIT:
-                await bot.send_photo(chat_id=target, photo=image, caption=text)
+    images = images or []
+    short = len(text) <= _CAPTION_LIMIT
+    try:
+        if video:
+            if short:
+                await bot.send_video(chat_id=target, video=video, caption=text)
                 return
-            await bot.send_photo(chat_id=target, photo=image)
-        except Exception as exc:  # noqa: BLE001
-            # A dead/unsupported image URL must not block the post itself.
-            log.warning("Could not send image %s: %s — posting text only", image, exc)
+            await bot.send_video(chat_id=target, video=video)
+        elif len(images) > 1:
+            group: list[
+                InputMediaAudio
+                | InputMediaDocument
+                | InputMediaLivePhoto
+                | InputMediaPhoto
+                | InputMediaVideo
+            ] = [
+                InputMediaPhoto(media=url, caption=text if i == 0 and short else None)
+                for i, url in enumerate(images[:_MEDIA_GROUP_LIMIT])
+            ]
+            await bot.send_media_group(chat_id=target, media=group)
+            if short:
+                return
+        elif images:
+            if short:
+                await bot.send_photo(chat_id=target, photo=images[0], caption=text)
+                return
+            await bot.send_photo(chat_id=target, photo=images[0])
+    except Exception as exc:  # noqa: BLE001
+        # A dead/unsupported media URL must not block the post itself.
+        log.warning("Could not send media: %s — posting text only", exc)
     await bot.send_message(chat_id=target, text=text, disable_web_page_preview=True)
 
 
@@ -69,6 +113,14 @@ async def run_once(
     if not entries:
         return RunResult("no_new", "Лента пуста или недоступна.")
 
+    # When the channel requires media, drop text-only entries up front so they
+    # never take a candidate slot nor get picked.
+    if channel.require_media:
+        entries = [e for e in entries if _has_media(e)]
+        if not entries:
+            log.info("Channel %s requires media but no entry carries any", channel.id)
+            return RunResult("no_new", "Нет новостей с картинкой или видео для публикации.")
+
     ids = [e["id"] for e in entries]
     unseen_ids = await filter_unseen(channel.id, ids)
     candidates = [e for e in entries if e["id"] in unseen_ids][: settings.max_candidates]
@@ -97,7 +149,10 @@ async def run_once(
     try:
         tone = get_preset(channel.tone)
         text = await deepseek.generate_post(chosen, tone)
-        await _publish(bot, target, text, chosen.get("image", ""))
+        images = chosen.get("images") or (
+            [chosen["image"]] if chosen.get("image") else []
+        )
+        await _publish(bot, target, text, images, chosen.get("video", ""))
     except Exception as exc:  # noqa: BLE001
         log.exception("Publishing failed")
         # Mark the rest as seen but NOT the failed one, so we can retry it later.

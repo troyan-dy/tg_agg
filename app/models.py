@@ -37,6 +37,12 @@ class Channel(Base):
     tone: Mapped[str] = mapped_column(String(32), default="news")
     run_hours: Mapped[str] = mapped_column(String(128), default="9,13,18")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # When True, only entries carrying an image or video are published; text-only
+    # entries are skipped. server_default keeps existing rows valid after the
+    # manual ALTER (no Alembic — see CLAUDE.md).
+    require_media: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

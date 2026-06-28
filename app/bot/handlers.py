@@ -1,29 +1,28 @@
 """Chat control: manage channels and, for the selected one, set the feed/tone/
 schedule, trigger a run, check status.
 
-The bot runs several channels; the admin picks an «active» channel (📺 Каналы)
-and the everyday buttons — 📡 Лента, 🎨 Тон, 🕒 Часы, 🚀 Запустить — all act on
-it. A channel is added by sending its link/@username: the bot resolves the chat
-and checks it is an admin there with the right to post.
+The bot runs several channels; the admin picks an «active» channel by tapping it
+on the channels screen and the everyday buttons — 📡 Лента, 🎨 Тон, 🕒 Часы,
+🚀 Запустить — all act on it. A channel is added by sending its link/@username:
+the bot resolves the chat and checks it is an admin there with the right to post.
 
-The admin drives the bot either with slash commands or with a persistent emoji
-keyboard; both paths share the same logic.
+The bot is driven entirely by a persistent reply keyboard — no slash commands
+(only the built-in /start bootstraps the menu) and no inline buttons. The
+«active channel» lives in the DB and the only conversational state (waiting for
+a pasted link/url) is persisted via the DB-backed FSM storage, so a restart
+never drops context.
 """
 from __future__ import annotations
 
 import logging
 import re
-from typing import cast
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -35,11 +34,9 @@ from app.pipeline import run_once
 from app.storage import (
     add_channel,
     delete_channel,
-    get_channel,
     get_channel_by_chat,
     get_selected_channel,
     list_channels,
-    parse_run_hours,
     set_selected_channel,
     update_channel,
 )
@@ -48,22 +45,13 @@ from app.tone import TONES, get_preset
 log = logging.getLogger("handlers")
 
 router = Router()
-# Only the admin may control the bot — both messages and inline-button taps.
+# Only the admin may control the bot.
 router.message.filter(F.from_user.id == settings.admin_id)
-router.callback_query.filter(F.from_user.id == settings.admin_id)
 
-# Callback-data prefixes.
-HOUR_CB = "hour:"           # "hour:9" toggles 09:00 for the selected channel
-HOURS_DONE_CB = "hours_done"
-TONE_CB = "tone:"           # "tone:expert" selects the preset
-TONE_DONE_CB = "tone_done"
-CH_DELYES_CB = "chdelyes:"  # confirm deletion of channel #3
-CH_DELNO_CB = "chdelno"     # cancel a delete confirmation
 
 # --- Keyboard button labels (also matched as incoming text) --------------------
 BTN_RUN = "🚀 Запустить"
 BTN_PREVIEW = "👁 Предпросмотр"
-BTN_CHANNELS = "📺 Каналы"
 BTN_ADDCHANNEL = "➕ Добавить канал"
 BTN_RSS = "📡 Лента"
 BTN_SETRSS = "📝 Сменить ленту"
@@ -76,6 +64,15 @@ BTN_BACK = "⬅️ К каналам"
 BTN_ENABLE = "▶️ Включить"
 BTN_DISABLE = "⏸ Выключить"
 BTN_DELETE = "🗑 Удалить"
+BTN_MEDIA_REQUIRE = "🖼 Только с медиа"   # turn the require-media filter on
+BTN_MEDIA_ANY = "📝 Разрешить текст"      # turn it off (text-only allowed again)
+BTN_DONE = "✅ Готово"                     # close the hours/tone editor
+BTN_DELYES = "🗑 Да, удалить"
+BTN_DELNO = "↩️ Отмена"
+
+# An hour toggle button looks like «✅ 09» / «▫️ 18»; this matches a tap on one.
+# Alternation (not a char class) because ▫️ is two code points (▫ + VS16).
+HOUR_BTN_RE = re.compile(r"^(?:✅|▫️) (\d{2})$")
 
 
 async def home_kb() -> ReplyKeyboardMarkup:
@@ -100,13 +97,15 @@ async def home_kb() -> ReplyKeyboardMarkup:
 
 def channel_kb(channel: Channel) -> ReplyKeyboardMarkup:
     """Per-channel keyboard: everyday actions on the active channel plus its
-    on/off toggle, delete and a «back to channels» row."""
+    on/off toggle, media filter, delete and a «back to channels» row."""
     toggle = BTN_DISABLE if channel.enabled else BTN_ENABLE
+    media = BTN_MEDIA_ANY if channel.require_media else BTN_MEDIA_REQUIRE
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_RUN), KeyboardButton(text=BTN_PREVIEW)],
             [KeyboardButton(text=BTN_RSS), KeyboardButton(text=BTN_SETRSS)],
             [KeyboardButton(text=BTN_TONE), KeyboardButton(text=BTN_SETHOURS)],
+            [KeyboardButton(text=media)],
             [KeyboardButton(text=toggle), KeyboardButton(text=BTN_DELETE)],
             [KeyboardButton(text=BTN_BACK)],
         ],
@@ -132,37 +131,60 @@ def cancel_kb(placeholder: str) -> ReplyKeyboardMarkup:
     )
 
 
-def hours_inline_kb(selected: set[int]) -> InlineKeyboardMarkup:
-    """24-hour toggle grid: tap an hour to switch publishing on/off for it.
+def _hour_btn_text(hour: int, on: bool) -> str:
+    return f"{'✅' if on else '▫️'} {hour:02d}"
 
-    Enabled hours are marked ✅, disabled ▫️. The last «Готово» row closes the
-    editor. Four columns keep all 24 buttons readable on a phone.
-    """
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
+
+def hours_reply_kb(selected: set[int]) -> ReplyKeyboardMarkup:
+    """24-hour toggle grid as a reply keyboard: tap an hour to switch publishing
+    on/off for it. Enabled hours are marked ✅, disabled ▫️. The «Готово» row
+    closes the editor. Four columns keep all 24 buttons readable on a phone."""
+    rows: list[list[KeyboardButton]] = []
+    row: list[KeyboardButton] = []
     for h in range(24):
-        mark = "✅" if h in selected else "▫️"
-        row.append(InlineKeyboardButton(text=f"{mark} {h:02d}", callback_data=f"{HOUR_CB}{h}"))
+        row.append(KeyboardButton(text=_hour_btn_text(h, h in selected)))
         if len(row) == 4:
             rows.append(row)
             row = []
-    rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=HOURS_DONE_CB)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append([KeyboardButton(text=BTN_DONE)])
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        input_field_placeholder="Тапай по часам — ✅ публикую, ▫️ нет",
+    )
 
 
-def tone_inline_kb(current: str) -> InlineKeyboardMarkup:
-    """Radio-style tone picker: one row per preset, the active one marked ✅."""
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"{'✅ ' if key == current else ''}{t.label}",
-                callback_data=f"{TONE_CB}{key}",
-            )
-        ]
-        for key, t in TONES.items()
-    ]
-    rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=TONE_DONE_CB)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def _tone_btn_text(key: str, active: bool) -> str:
+    return f"{'✅ ' if active else ''}{TONES[key].label}"
+
+
+# Every possible tone-button caption (with and without the active ✅) → its key,
+# so a tap on a tone button can be matched and resolved back to the preset.
+TONE_BTN_TEXTS: dict[str, str] = {}
+for _key in TONES:
+    TONE_BTN_TEXTS[_tone_btn_text(_key, False)] = _key
+    TONE_BTN_TEXTS[_tone_btn_text(_key, True)] = _key
+
+
+def tone_reply_kb(current: str) -> ReplyKeyboardMarkup:
+    """Radio-style tone picker as a reply keyboard: one button per preset, the
+    active one marked ✅. «Готово» closes the editor."""
+    rows = [[KeyboardButton(text=_tone_btn_text(key, key == current))] for key in TONES]
+    rows.append([KeyboardButton(text=BTN_DONE)])
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        input_field_placeholder="Выбери тон — применяется сразу",
+    )
+
+
+def delete_confirm_kb() -> ReplyKeyboardMarkup:
+    """Two-button reply keyboard confirming channel deletion."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=BTN_DELYES), KeyboardButton(text=BTN_DELNO)]],
+        resize_keyboard=True,
+        input_field_placeholder="Подтверди удаление",
+    )
 
 
 class SetRss(StatesGroup):
@@ -180,27 +202,22 @@ class AddChannel(StatesGroup):
 HELP = (
     "Я веду несколько Telegram-каналов на автопилоте: периодически читаю их RSS, "
     "через DeepSeek выбираю важную новость и публикую пост.\n\n"
+    "Всё управление — кнопками на клавиатуре, команды и кнопки под сообщениями не "
+    "нужны.\n\n"
     "Навигация в два шага. Сначала экран каналов: тапни по названию, чтобы открыть "
     "канал, или «➕ Добавить канал» (пришли ссылку — бот должен быть админом канала "
-    "с правом публикации). Затем экран настройки канала: кнопки 📡 Лента, 🎨 Тон, "
-    "🕒 Часы, 🚀 Запустить, ⏸/▶️ и 🗑 действуют на него; «⬅️ К каналам» — назад к "
-    "выбору.\n\n"
-    "Команды:\n"
-    "• 📺 <code>/channels</code> — список каналов, выбор активного, удаление\n"
-    "• ➕ <code>/addchannel</code> — добавить канал по ссылке\n"
-    "• 🚀 <code>/run</code> — запустить разбор активного канала сейчас\n"
-    "• 👁 <code>/preview</code> — пробный прогон: пост придёт сюда, в канал НЕ "
-    "публикуется и в базу не пишется\n"
-    "• 📡 <code>/rss</code> — показать ленту активного канала\n"
-    "• 📝 <code>/setrss &lt;url&gt;</code> — задать RSS-ленту активного канала\n"
-    "• 🕒 <code>/hours</code> — часы публикации активного канала\n"
-    "• 🕒 <code>/sethours</code> — сетка часов: тапай, чтобы включать/выключать "
-    f"(в {settings.timezone}); можно и текстом: <code>/sethours 9,13,18</code>\n"
-    "• 🎨 <code>/tone</code> — тон постов активного канала\n"
-    "• 🎨 <code>/settone</code> — выбрать тон кнопками "
-    "(или текстом: <code>/settone expert</code>)\n"
-    "• 📊 <code>/status</code> — все каналы и их настройки\n"
-    "• ❓ <code>/help</code> — эта справка"
+    "с правом публикации). Затем экран настройки канала:\n"
+    "• 📡 Лента / 📝 Сменить ленту — RSS-источник\n"
+    "• 🎨 Тон — стиль постов (кнопки)\n"
+    "• 🕒 Часы — сетка часов публикации (тапай, чтобы вкл/выкл)\n"
+    "• 🖼 Только с медиа — публиковать лишь новости с картинкой или видео "
+    "(несколько картинок — постит все); 📝 Разрешить текст возвращает обратно\n"
+    "• 🚀 Запустить — разобрать ленту и опубликовать сейчас\n"
+    "• 👁 Предпросмотр — пробный прогон сюда, без публикации и записи в базу\n"
+    "• ⏸/▶️ — включить/выключить автопостинг канала\n"
+    "• 🗑 Удалить — удалить канал\n"
+    "• ⬅️ К каналам — назад к выбору\n\n"
+    "📊 Статус — все каналы и их настройки."
 )
 
 
@@ -223,11 +240,12 @@ def _channel_header(channel: Channel) -> str:
     """Screen 2 header: the active channel and its current settings at a glance."""
     tone = get_preset(channel.tone)
     state = "▶️ включён" if channel.enabled else "⏸ выключен"
+    media = "🖼 только с медиа" if channel.require_media else "📝 любые посты"
     return (
         f"⚙️ Настройка канала: <b>{_ch_label(channel)}</b>\n"
         f"📡 {channel.rss_url or '— лента не задана'}\n"
         f"🕒 {_fmt_hours(channel.hours_list)} ({settings.timezone}) · "
-        f"🎨 {tone.label} · {state}"
+        f"🎨 {tone.label} · {state} · {media}"
     )
 
 
@@ -236,7 +254,7 @@ async def _require_channel(message: Message) -> Channel | None:
     channel = await get_selected_channel()
     if channel is None:
         await message.answer(
-            "Сначала добавь канал: «➕ Добавить канал» или /addchannel.",
+            "Сначала добавь канал кнопкой «➕ Добавить канал».",
             reply_markup=await home_kb(),
         )
     return channel
@@ -366,26 +384,15 @@ async def _show_rss(message: Message) -> None:
         f"📡 Лента канала <b>{_ch_label(channel)}</b>:\n{channel.rss_url}"
         if channel.rss_url
         else f"📡 У канала <b>{_ch_label(channel)}</b> лента не задана. "
-        "Нажми «📝 Сменить ленту» или /setrss &lt;url&gt;",
+        "Нажми «📝 Сменить ленту».",
         reply_markup=channel_kb(channel),
     )
 
 
 # --- Hours (selected channel) --------------------------------------------------
-async def _show_hours(message: Message) -> None:
-    channel = await _require_channel(message)
-    if channel is None:
-        return
-    await message.answer(
-        f"🕒 Часы публикации <b>{_ch_label(channel)}</b>:\n"
-        f"{_fmt_hours(channel.hours_list)} ({settings.timezone})",
-        reply_markup=channel_kb(channel),
-    )
-
-
 HOURS_GRID_PROMPT = (
     "🕒 Часы публикации — тапай по часам, чтобы включать/выключать.\n"
-    "✅ — публикую, ▫️ — нет. Изменения применяются сразу."
+    "✅ — публикую, ▫️ — нет. Изменения применяются сразу; «✅ Готово» — назад."
 )
 
 
@@ -396,34 +403,11 @@ async def _show_hours_grid(message: Message) -> None:
         return
     await message.answer(
         f"{HOURS_GRID_PROMPT}\nКанал: <b>{_ch_label(channel)}</b>",
-        reply_markup=hours_inline_kb(set(channel.hours_list)),
-    )
-
-
-async def _save_hours(message: Message, hours: list[int]) -> None:
-    channel = await _require_channel(message)
-    if channel is None:
-        return
-    await update_channel(channel.id, run_hours=",".join(str(h) for h in hours))
-    log.info("Admin set run hours for channel %s: %s", channel.id, hours)
-    await message.answer(
-        f"✅ Часы <b>{_ch_label(channel)}</b>: {_fmt_hours(hours)} ({settings.timezone})",
-        reply_markup=channel_kb(channel),
+        reply_markup=hours_reply_kb(set(channel.hours_list)),
     )
 
 
 # --- Tone (selected channel) ---------------------------------------------------
-async def _show_tone(message: Message) -> None:
-    channel = await _require_channel(message)
-    if channel is None:
-        return
-    tone = get_preset(channel.tone)
-    await message.answer(
-        f"🎨 Тон <b>{_ch_label(channel)}</b>: {tone.label}\n{tone.description}",
-        reply_markup=channel_kb(channel),
-    )
-
-
 def _tone_grid_prompt() -> str:
     legend = "\n".join(f"{t.label} — {t.description}" for t in TONES.values())
     return "🎨 Тон постов — выбери пресет (применяется сразу):\n\n" + legend
@@ -436,7 +420,7 @@ async def _show_tone_grid(message: Message) -> None:
         return
     await message.answer(
         f"{_tone_grid_prompt()}\n\nКанал: <b>{_ch_label(channel)}</b>",
-        reply_markup=tone_inline_kb(channel.tone),
+        reply_markup=tone_reply_kb(channel.tone),
     )
 
 
@@ -445,7 +429,7 @@ async def _status_body() -> str:
     """A summary of every channel and its settings, marking the active one."""
     channels = await list_channels()
     if not channels:
-        return "Каналов пока нет. Добавь первый: «➕ Добавить канал» или /addchannel."
+        return "Каналов пока нет. Добавь первый: «➕ Добавить канал»."
     selected = await get_selected_channel()
     sel_id = selected.id if selected else None
     blocks = []
@@ -453,8 +437,9 @@ async def _status_body() -> str:
         head = "▶️" if c.id == sel_id else "•"
         tone = get_preset(c.tone)
         off = "" if c.enabled else "  ⏸ выключен"
+        media = "  🖼 только с медиа" if c.require_media else ""
         blocks.append(
-            f"{head} <b>{_ch_label(c)}</b>{off}\n"
+            f"{head} <b>{_ch_label(c)}</b>{off}{media}\n"
             f"   📡 {c.rss_url or '— не задана'}\n"
             f"   🕒 {_fmt_hours(c.hours_list)} ({settings.timezone})\n"
             f"   🎨 {tone.label}"
@@ -479,12 +464,12 @@ async def _do_run(message: Message, bot: Bot) -> None:
     channel = await _require_channel(message)
     if channel is None:
         return
-    log.info("Manual /run for channel %s triggered by admin", channel.id)
+    log.info("Manual run for channel %s triggered by admin", channel.id)
     await message.answer(f"⏳ Запускаю разбор ленты канала <b>{_ch_label(channel)}</b>…")
     result = await run_once(bot, channel)
     replies = {
         "posted": f"✅ Опубликовано в <b>{_ch_label(channel)}</b>: {result.detail}",
-        "no_feed": "⚠️ RSS-лента не задана. Нажми «📝 Сменить ленту» или /setrss &lt;url&gt;",
+        "no_feed": "⚠️ RSS-лента не задана. Нажми «📝 Сменить ленту».",
         "no_new": "ℹ️ Новых новостей нет.",
         "error": f"❌ Ошибка: {result.detail}",
     }
@@ -499,7 +484,7 @@ async def _do_preview(message: Message, bot: Bot) -> None:
     channel = await _require_channel(message)
     if channel is None:
         return
-    log.info("Manual /preview for channel %s triggered by admin", channel.id)
+    log.info("Manual preview for channel %s triggered by admin", channel.id)
     await message.answer(
         f"⏳ Пробный прогон <b>{_ch_label(channel)}</b>: соберу пост сюда, "
         "без публикации и записи в базу…"
@@ -507,7 +492,7 @@ async def _do_preview(message: Message, bot: Bot) -> None:
     result = await run_once(bot, channel, chat_id=settings.admin_id, persist=False)
     replies = {
         "posted": "☝️ Так выглядел бы пост. В канал не отправлено, база не тронута.",
-        "no_feed": "⚠️ RSS-лента не задана. Нажми «📝 Сменить ленту» или /setrss &lt;url&gt;",
+        "no_feed": "⚠️ RSS-лента не задана. Нажми «📝 Сменить ленту».",
         "no_new": "ℹ️ Новых новостей нет.",
         "error": f"❌ Ошибка: {result.detail}",
     }
@@ -516,103 +501,11 @@ async def _do_preview(message: Message, bot: Bot) -> None:
     )
 
 
-# --- Slash commands ------------------------------------------------------------
-@router.message(Command("start", "help", "menu"))
-async def cmd_help(message: Message) -> None:
+# --- /start bootstrap ----------------------------------------------------------
+@router.message(Command("start", "menu"))
+async def cmd_start(message: Message) -> None:
+    """The only command: Telegram's built-in «Start» button bootstraps the menu."""
     await message.answer(HELP, reply_markup=await _active_kb())
-
-
-@router.message(Command("channels"))
-async def cmd_channels(message: Message) -> None:
-    await _show_channels(message)
-
-
-@router.message(Command("addchannel"))
-async def cmd_addchannel(message: Message, state: FSMContext) -> None:
-    await _start_add_channel(message, state)
-
-
-@router.message(Command("setrss"))
-async def cmd_setrss(message: Message, command: CommandObject) -> None:
-    url = (command.args or "").strip()
-    if not _valid_url(url):
-        await message.answer(
-            "Укажи корректный URL: <code>/setrss https://example.com/feed.xml</code>"
-        )
-        return
-    await _save_rss(message, url)
-
-
-@router.message(Command("rss"))
-async def cmd_rss(message: Message) -> None:
-    await _show_rss(message)
-
-
-HOURS_HINT = "Укажи часы через запятую (0–23), напр. <code>/sethours 9,13,18</code>"
-
-
-@router.message(Command("hours"))
-async def cmd_hours(message: Message) -> None:
-    await _show_hours(message)
-
-
-@router.message(Command("sethours"))
-async def cmd_sethours(message: Message, command: CommandObject) -> None:
-    # No args → open the interactive grid; args → parse them directly.
-    if not (command.args or "").strip():
-        await _show_hours_grid(message)
-        return
-    try:
-        hours = parse_run_hours(command.args or "")
-    except ValueError:
-        await message.answer(HOURS_HINT)
-        return
-    await _save_hours(message, hours)
-
-
-TONE_HINT = "Доступные пресеты: " + ", ".join(f"<code>{k}</code>" for k in TONES)
-
-
-@router.message(Command("tone"))
-async def cmd_tone(message: Message) -> None:
-    await _show_tone(message)
-
-
-@router.message(Command("settone"))
-async def cmd_settone(message: Message, command: CommandObject) -> None:
-    # No args → open the picker; an arg must be a known preset key.
-    arg = (command.args or "").strip().lower()
-    if not arg:
-        await _show_tone_grid(message)
-        return
-    if arg not in TONES:
-        await message.answer(TONE_HINT)
-        return
-    channel = await _require_channel(message)
-    if channel is None:
-        return
-    await update_channel(channel.id, tone=arg)
-    channel.tone = arg
-    tone = TONES[arg]
-    await message.answer(
-        f"✅ Тон <b>{_ch_label(channel)}</b>: {tone.label}\n{tone.description}",
-        reply_markup=channel_kb(channel),
-    )
-
-
-@router.message(Command("status"))
-async def cmd_status(message: Message) -> None:
-    await _show_status(message)
-
-
-@router.message(Command("preview"))
-async def cmd_preview(message: Message, bot: Bot) -> None:
-    await _do_preview(message, bot)
-
-
-@router.message(Command("run"))
-async def cmd_run(message: Message, bot: Bot) -> None:
-    await _do_run(message, bot)
 
 
 # --- Keyboard buttons ----------------------------------------------------------
@@ -624,11 +517,6 @@ async def btn_run(message: Message, bot: Bot) -> None:
 @router.message(F.text == BTN_PREVIEW)
 async def btn_preview(message: Message, bot: Bot) -> None:
     await _do_preview(message, bot)
-
-
-@router.message(F.text == BTN_CHANNELS)
-async def btn_channels(message: Message) -> None:
-    await _show_channels(message)
 
 
 @router.message(F.text == BTN_BACK)
@@ -653,26 +541,59 @@ async def btn_toggle(message: Message) -> None:
     )
 
 
-@router.message(F.text == BTN_DELETE)
-async def btn_delete(message: Message) -> None:
-    """Ask to delete the active channel (confirmation reuses the inline flow)."""
+@router.message(F.text.in_({BTN_MEDIA_REQUIRE, BTN_MEDIA_ANY}))
+async def btn_toggle_media(message: Message) -> None:
+    """Flip the active channel's require_media filter and refresh Screen 2."""
     channel = await _require_channel(message)
     if channel is None:
         return
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🗑 Удалить", callback_data=f"{CH_DELYES_CB}{channel.id}"
-                ),
-                InlineKeyboardButton(text="↩️ Отмена", callback_data=CH_DELNO_CB),
-            ]
-        ]
+    new_state = not channel.require_media
+    await update_channel(channel.id, require_media=new_state)
+    channel.require_media = new_state
+    log.info("Admin set require_media=%s for channel %s", new_state, channel.id)
+    word = (
+        "только посты с картинкой или видео 🖼"
+        if new_state
+        else "любые посты, включая текстовые 📝"
     )
     await message.answer(
-        f"Удалить канал <b>{_ch_label(channel)}</b> и всю его историю публикаций?",
-        reply_markup=kb,
+        f"Канал <b>{_ch_label(channel)}</b>: теперь публикуются {word}.",
+        reply_markup=channel_kb(channel),
     )
+
+
+@router.message(F.text == BTN_DELETE)
+async def btn_delete(message: Message) -> None:
+    """Ask to delete the active channel (confirmation via a reply keyboard)."""
+    channel = await _require_channel(message)
+    if channel is None:
+        return
+    await message.answer(
+        f"Удалить канал <b>{_ch_label(channel)}</b> и всю его историю публикаций?",
+        reply_markup=delete_confirm_kb(),
+    )
+
+
+@router.message(F.text == BTN_DELYES)
+async def btn_delete_yes(message: Message) -> None:
+    """Confirm deletion: drop the active channel and return to the channels screen."""
+    channel = await _require_channel(message)
+    if channel is None:
+        return
+    label = _ch_label(channel)
+    await delete_channel(channel.id)
+    log.info("Admin deleted channel %s", channel.id)
+    await message.answer(f"🗑 Канал <b>{label}</b> удалён.", reply_markup=await home_kb())
+
+
+@router.message(F.text == BTN_DELNO)
+async def btn_delete_no(message: Message) -> None:
+    """Cancel deletion — back to the channel screen."""
+    channel = await get_selected_channel()
+    if channel is None:
+        await _show_channels(message)
+        return
+    await message.answer("Отменено — канал не удалён.", reply_markup=channel_kb(channel))
 
 
 @router.message(F.text == BTN_RSS)
@@ -687,7 +608,7 @@ async def btn_status(message: Message) -> None:
 
 @router.message(F.text == BTN_HELP)
 async def btn_help(message: Message) -> None:
-    await cmd_help(message)
+    await message.answer(HELP, reply_markup=await _active_kb())
 
 
 @router.message(F.text == BTN_SETHOURS)
@@ -700,105 +621,61 @@ async def btn_tone(message: Message) -> None:
     await _show_tone_grid(message)
 
 
-# --- «Часы» toggle grid (inline buttons) ---------------------------------------
-@router.callback_query(F.data.startswith(HOUR_CB))
-async def cb_toggle_hour(callback: CallbackQuery) -> None:
+# --- «Часы» toggle grid (reply keyboard) ---------------------------------------
+@router.message(F.text.regexp(HOUR_BTN_RE))
+async def btn_toggle_hour(message: Message) -> None:
     """Toggle one hour on/off for the selected channel and refresh the grid."""
-    if not callback.data:  # data is guaranteed by the filter; narrows for mypy
-        return
-    channel = await get_selected_channel()
+    channel = await _require_channel(message)
     if channel is None:
-        await callback.answer("Нет активного канала", show_alert=True)
         return
-    hour = int(callback.data.removeprefix(HOUR_CB))
+    m = HOUR_BTN_RE.match(message.text or "")
+    if m is None:  # guaranteed by the filter; narrows for type-checkers
+        return
+    hour = int(m.group(1))
     selected = set(channel.hours_list)
     if hour in selected:
         if len(selected) == 1:
             # Never leave an empty schedule — a channel with no hours never runs.
-            await callback.answer("Должен остаться хотя бы один час", show_alert=True)
+            await message.answer(
+                "Должен остаться хотя бы один час.",
+                reply_markup=hours_reply_kb(selected),
+            )
             return
         selected.discard(hour)
-        toggled_on = False
     else:
         selected.add(hour)
-        toggled_on = True
     await update_channel(channel.id, run_hours=",".join(str(h) for h in sorted(selected)))
-    if callback.message is not None:
-        await cast(Message, callback.message).edit_reply_markup(
-            reply_markup=hours_inline_kb(selected)
-        )
-    await callback.answer(f"{hour:02d}:00 — {'вкл' if toggled_on else 'выкл'}")
+    await message.answer(
+        f"🕒 {_fmt_hours(sorted(selected))} ({settings.timezone})",
+        reply_markup=hours_reply_kb(selected),
+    )
 
 
-@router.callback_query(F.data == HOURS_DONE_CB)
-async def cb_hours_done(callback: CallbackQuery) -> None:
-    """Close the grid: replace it with a plain summary of the saved hours."""
-    channel = await get_selected_channel()
-    hours = channel.hours_list if channel else []
-    if callback.message is not None:
-        await cast(Message, callback.message).edit_text(
-            f"🕒 Часы публикации: {_fmt_hours(hours)} ({settings.timezone})"
-        )
-    await callback.answer("Сохранено")
-
-
-# --- «Тон» picker (inline buttons) ---------------------------------------------
-@router.callback_query(F.data.startswith(TONE_CB))
-async def cb_select_tone(callback: CallbackQuery) -> None:
+# --- «Тон» picker (reply keyboard) ---------------------------------------------
+@router.message(F.text.in_(set(TONE_BTN_TEXTS)))
+async def btn_select_tone(message: Message) -> None:
     """Select a tone preset for the selected channel and refresh the picker."""
-    if not callback.data:  # guaranteed by the filter; narrows for mypy
+    channel = await _require_channel(message)
+    if channel is None:
         return
+    key = TONE_BTN_TEXTS[message.text or ""]
+    await update_channel(channel.id, tone=key)
+    channel.tone = key
+    log.info("Admin set tone=%s for channel %s", key, channel.id)
+    await message.answer(
+        f"🎨 Тон: {TONES[key].label}\n{TONES[key].description}",
+        reply_markup=tone_reply_kb(key),
+    )
+
+
+@router.message(F.text == BTN_DONE)
+async def btn_editor_done(message: Message) -> None:
+    """«✅ Готово» closes the hours/tone editor and returns to the channel screen."""
     channel = await get_selected_channel()
     if channel is None:
-        await callback.answer("Нет активного канала", show_alert=True)
+        await _show_channels(message)
         return
-    key = callback.data.removeprefix(TONE_CB)
-    if key not in TONES:
-        await callback.answer()
-        return
-    await update_channel(channel.id, tone=key)
-    if callback.message is not None:
-        await cast(Message, callback.message).edit_reply_markup(
-            reply_markup=tone_inline_kb(key)
-        )
-    await callback.answer(f"Тон: {TONES[key].label}")
-
-
-@router.callback_query(F.data == TONE_DONE_CB)
-async def cb_tone_done(callback: CallbackQuery) -> None:
-    """Close the picker: replace it with a plain summary of the chosen tone."""
-    channel = await get_selected_channel()
-    tone = get_preset(channel.tone if channel else None)
-    if callback.message is not None:
-        await cast(Message, callback.message).edit_text(
-            f"🎨 Тон постов: {tone.label}\n{tone.description}"
-        )
-    await callback.answer("Сохранено")
-
-
-# --- Channel deletion confirmation (inline yes/no) -----------------------------
-@router.callback_query(F.data.startswith(CH_DELYES_CB))
-async def cb_delete_channel_yes(callback: CallbackQuery) -> None:
-    if not callback.data:
-        return
-    channel_id = int(callback.data.removeprefix(CH_DELYES_CB))
-    channel = await get_channel(channel_id)
-    await delete_channel(channel_id)
-    await callback.answer(f"Удалён: {_ch_label(channel)}" if channel else "Удалён")
-    # Drop the confirmation buttons and return to Screen 1 (the active channel may
-    # now be gone, so resync the reply keyboard to the channel list).
-    if callback.message is not None:
-        msg = cast(Message, callback.message)
-        await msg.edit_text("🗑 Канал удалён.")
-        await msg.answer(CHANNELS_PROMPT, reply_markup=await home_kb())
-
-
-@router.callback_query(F.data == CH_DELNO_CB)
-async def cb_delete_channel_no(callback: CallbackQuery) -> None:
-    """«↩️ Отмена» on the delete confirmation — just drop the buttons."""
-    if callback.message is not None:
-        await cast(Message, callback.message).edit_text("Отменено — канал не удалён.")
-    await callback.answer()
+    await message.answer(_channel_header(channel), reply_markup=channel_kb(channel))
 
 
 # --- «Добавить канал» conversational flow --------------------------------------
@@ -810,14 +687,10 @@ ADD_CHANNEL_PROMPT = (
 )
 
 
-async def _start_add_channel(message: Message, state: FSMContext) -> None:
-    await state.set_state(AddChannel.waiting_for_link)
-    await message.answer(ADD_CHANNEL_PROMPT, reply_markup=cancel_kb("Пришли ссылку на канал…"))
-
-
 @router.message(F.text == BTN_ADDCHANNEL)
 async def btn_addchannel(message: Message, state: FSMContext) -> None:
-    await _start_add_channel(message, state)
+    await state.set_state(AddChannel.waiting_for_link)
+    await message.answer(ADD_CHANNEL_PROMPT, reply_markup=cancel_kb("Пришли ссылку на канал…"))
 
 
 @router.message(AddChannel.waiting_for_link, F.text == BTN_CANCEL)
@@ -868,7 +741,7 @@ async def setrss_receive(message: Message, state: FSMContext) -> None:
 @router.message()
 async def fallback(message: Message) -> None:
     """Catch-all: a tap on a channel button (its label as text) opens Screen 2;
-    anything else is an unknown command.
+    anything else is an unknown input.
 
     Channel buttons live on the home keyboard and carry the channel label as
     plain text, so they have no dedicated handler — we match the text against the
@@ -886,6 +759,6 @@ async def fallback(message: Message) -> None:
             )
             return
     await message.answer(
-        "Не понял 🤔 Выбери действие на клавиатуре ниже или загляни в ❓ /help.",
+        "Не понял 🤔 Выбери действие на клавиатуре ниже.",
         reply_markup=await _active_kb(),
     )

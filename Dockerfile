@@ -10,7 +10,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# Application code.
+# Application code + Alembic migrations (applied at startup by run_migrations).
 COPY app ./app
+COPY migrations ./migrations
+COPY alembic.ini ./
 
 CMD ["uv", "run", "--no-dev", "python", "-m", "app.main"]

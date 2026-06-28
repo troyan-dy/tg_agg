@@ -12,6 +12,7 @@ dependencies = [
     "feedparser>=6.0",
     "openai>=1.30",
     "pydantic-settings>=2.1",
+    "alembic>=1.18.5",
 ]
 
 [dependency-groups]

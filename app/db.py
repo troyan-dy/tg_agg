@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -10,19 +12,30 @@ log = logging.getLogger("db")
 engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+# Alembic config lives at the repo root (one level above the app package).
+_ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+
 
 class Base(DeclarativeBase):
     pass
 
 
-async def init_db() -> None:
-    """Create any missing tables; leave an existing schema untouched.
+def _alembic_config():
+    from alembic.config import Config
 
-    No Alembic and no in-place migrations: create_all only adds tables that are
-    absent, so a fresh DB gets the full schema while an existing one is left as
-    is. Schema changes to existing tables must be handled manually.
+    return Config(str(_ALEMBIC_INI))
+
+
+async def run_migrations() -> None:
+    """Bring the schema up to the latest Alembic revision (`upgrade head`).
+
+    Alembic is the single source of truth for the schema (no more create_all).
+    `command.upgrade` is synchronous and spins its own event loop inside
+    `env.py`, so it runs in a worker thread to stay off the running loop.
     """
+    from alembic import command
+
     import app.models  # noqa: F401 - ensure models are registered
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    log.info("Applying database migrations (alembic upgrade head)…")
+    await asyncio.to_thread(command.upgrade, _alembic_config(), "head")

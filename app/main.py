@@ -9,15 +9,15 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import (
-    BotCommand,
     BotCommandScopeChat,
     Message,
     TelegramObject,
 )
 
+from app.bot.fsm_storage import DBStorage
 from app.bot.handlers import router, startup_notice
 from app.config import settings
-from app.db import init_db
+from app.db import run_migrations
 from app.pipeline import run_once
 from app.scheduler.worker import build_scheduler
 from app.storage import list_channels
@@ -49,23 +49,13 @@ async def log_incoming(
 
 
 async def _set_commands(bot: Bot) -> None:
-    """Populate the «/» menu in the admin's chat with friendly labels."""
-    commands = [
-        BotCommand(command="menu", description="🏠 Меню"),
-        BotCommand(command="channels", description="📺 Каналы"),
-        BotCommand(command="addchannel", description="➕ Добавить канал"),
-        BotCommand(command="run", description="🚀 Запустить разбор"),
-        BotCommand(command="preview", description="👁 Предпросмотр"),
-        BotCommand(command="rss", description="📡 Текущая лента"),
-        BotCommand(command="setrss", description="📝 Сменить ленту"),
-        BotCommand(command="hours", description="🕒 Часы публикации"),
-        BotCommand(command="sethours", description="🕒 Сменить часы"),
-        BotCommand(command="tone", description="🎨 Тон постов"),
-        BotCommand(command="settone", description="🎨 Сменить тон"),
-        BotCommand(command="status", description="📊 Статус"),
-        BotCommand(command="help", description="❓ Помощь"),
-    ]
-    await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=settings.admin_id))
+    """Clear the «/» command menu — the bot is driven entirely by the keyboard.
+
+    Telegram still surfaces a built-in «Start» button (sends /start) in a fresh
+    chat, which the handlers treat as «open the menu»; everything else lives on
+    the persistent reply keyboard, so we leave the «/» menu empty.
+    """
+    await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=settings.admin_id))
 
 
 def _setup_logging() -> None:
@@ -82,10 +72,11 @@ async def main() -> None:
     _setup_logging()
     log.info("Starting bot (admin_id=%s)", settings.admin_id)
 
-    await init_db()
+    await run_migrations()
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher()
+    # DB-backed FSM storage so a restart never drops a half-finished input flow.
+    dp = Dispatcher(storage=DBStorage())
     dp.message.outer_middleware(log_incoming)
     dp.include_router(router)
 

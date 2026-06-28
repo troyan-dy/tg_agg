@@ -10,10 +10,15 @@ services:
     volumes:
       - ./pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tg -d tg_agg"]
+      # Check over TCP (-h 127.0.0.1), not the local socket: during first-time
+      # init the official image runs a temporary socket-only server, and a plain
+      # `pg_isready` would report «ready» before the real network listener is up.
+      # start_period keeps those early failures from counting while it initializes.
+      test: ["CMD-SHELL", "pg_isready -U tg -d tg_agg -h 127.0.0.1"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
   bot:
     build: .
@@ -21,6 +26,8 @@ services:
     environment:
       # Reach Postgres via the compose service name, not localhost.
       DATABASE_URL: postgresql+asyncpg://tg:tg@db:5432/tg_agg
+    # Do not start the bot until Postgres passes its healthcheck (accepts TCP
+    # connections) — the bot runs `alembic upgrade head` immediately on startup.
     depends_on:
       db:
         condition: service_healthy

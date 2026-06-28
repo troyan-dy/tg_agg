@@ -41,6 +41,8 @@ def test_normalize_shape():
         "summary": "Summary",
         "link": "https://example.com/a",
         "image": "",
+        "images": [],
+        "video": "",
     }
 
 
@@ -82,6 +84,32 @@ def test_extract_image_scans_content_html():
 
 def test_extract_image_absent_returns_empty():
     assert rss._extract_image({"summary": "no media here"}) == ""
+
+
+def test_extract_images_collects_all_deduped():
+    entry = {
+        "media_content": [
+            {"url": "https://cdn/a.jpg", "medium": "image"},
+            {"url": "https://cdn/clip.mp4", "medium": "video"},  # video skipped
+        ],
+        "summary": '<img src="https://cdn/a.jpg"><img src="https://cdn/b.jpg">',
+    }
+    # a.jpg appears twice (media_content + html) but is deduped, order preserved.
+    assert rss._extract_images(entry) == ["https://cdn/a.jpg", "https://cdn/b.jpg"]
+
+
+def test_extract_video_from_media_content():
+    entry = {"media_content": [{"url": "https://cdn/clip.mp4", "medium": "video"}]}
+    assert rss._extract_video(entry) == "https://cdn/clip.mp4"
+
+
+def test_extract_video_from_enclosure():
+    entry = {"enclosures": [{"type": "video/mp4", "href": "https://cdn/v.mp4"}]}
+    assert rss._extract_video(entry) == "https://cdn/v.mp4"
+
+
+def test_extract_video_absent_returns_empty():
+    assert rss._extract_video({"summary": "no media"}) == ""
 
 
 async def test_fetch_entries_normalizes_limits_and_drops_idless(monkeypatch):

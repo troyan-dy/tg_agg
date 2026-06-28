@@ -17,9 +17,21 @@ def bot():
 
 
 def _channel(
-    *, rss_url: str | None = "http://f", tone: str = "news", chat_id: str = "@chan"
+    *,
+    rss_url: str | None = "http://f",
+    tone: str = "news",
+    chat_id: str = "@chan",
+    require_media: bool = False,
 ) -> Channel:
-    return Channel(id=1, chat_id=chat_id, title="Chan", rss_url=rss_url, tone=tone, run_hours="9")
+    return Channel(
+        id=1,
+        chat_id=chat_id,
+        title="Chan",
+        rss_url=rss_url,
+        tone=tone,
+        run_hours="9",
+        require_media=require_media,
+    )
 
 
 def _entries(n: int) -> list[dict]:
@@ -244,7 +256,7 @@ async def test_channel_tone_passed_to_generate(monkeypatch, bot):
 
 
 async def test_publish_short_post_with_image_uses_caption(bot):
-    await pipeline._publish(bot, 7, "<b>post</b>", "https://cdn/p.jpg")
+    await pipeline._publish(bot, 7, "<b>post</b>", ["https://cdn/p.jpg"])
     bot.send_photo.assert_awaited_once_with(
         chat_id=7, photo="https://cdn/p.jpg", caption="<b>post</b>"
     )
@@ -253,7 +265,7 @@ async def test_publish_short_post_with_image_uses_caption(bot):
 
 async def test_publish_long_post_with_image_splits(bot):
     text = "x" * (pipeline._CAPTION_LIMIT + 1)
-    await pipeline._publish(bot, 7, text, "https://cdn/p.jpg")
+    await pipeline._publish(bot, 7, text, ["https://cdn/p.jpg"])
     # Image first as its own message, full text after — nothing truncated.
     bot.send_photo.assert_awaited_once_with(chat_id=7, photo="https://cdn/p.jpg")
     bot.send_message.assert_awaited_once_with(
@@ -263,10 +275,31 @@ async def test_publish_long_post_with_image_splits(bot):
 
 async def test_publish_falls_back_to_text_when_image_fails(bot):
     bot.send_photo.side_effect = RuntimeError("bad image url")
-    await pipeline._publish(bot, 7, "post", "https://cdn/dead.jpg")
+    await pipeline._publish(bot, 7, "post", ["https://cdn/dead.jpg"])
     bot.send_message.assert_awaited_once_with(
         chat_id=7, text="post", disable_web_page_preview=True
     )
+
+
+async def test_publish_multiple_images_sends_media_group(bot):
+    await pipeline._publish(bot, 7, "post", ["https://cdn/a.jpg", "https://cdn/b.jpg"])
+    bot.send_media_group.assert_awaited_once()
+    kwargs = bot.send_media_group.await_args.kwargs
+    assert kwargs["chat_id"] == 7
+    group = kwargs["media"]
+    assert [m.media for m in group] == ["https://cdn/a.jpg", "https://cdn/b.jpg"]
+    assert group[0].caption == "post"  # caption rides the first item
+    assert group[1].caption is None
+    bot.send_photo.assert_not_called()
+    bot.send_message.assert_not_called()
+
+
+async def test_publish_video_sends_video(bot):
+    await pipeline._publish(bot, 7, "post", [], "https://cdn/clip.mp4")
+    bot.send_video.assert_awaited_once_with(
+        chat_id=7, video="https://cdn/clip.mp4", caption="post"
+    )
+    bot.send_message.assert_not_called()
 
 
 async def test_posted_with_image_sends_photo(monkeypatch, bot):
@@ -286,6 +319,49 @@ async def test_posted_with_image_sends_photo(monkeypatch, bot):
         chat_id=ch.chat_id, photo="https://cdn/i.jpg", caption="<b>p</b>"
     )
     bot.send_message.assert_not_called()
+
+
+async def test_require_media_skips_text_only(monkeypatch, bot):
+    # require_media on, but no entry carries media → nothing to post.
+    entries = _entries(3)  # plain text entries, no image/video
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
+    fu = AsyncMock(return_value={"0", "1", "2"})
+    monkeypatch.setattr(pipeline, "filter_unseen", fu)
+    pick = AsyncMock()
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
+
+    result = await pipeline.run_once(bot, _channel(require_media=True))
+
+    assert result.status == "no_new"
+    fu.assert_not_called()  # bailed before touching the feed dedup
+    pick.assert_not_called()
+    bot.send_message.assert_not_called()
+
+
+async def test_require_media_keeps_only_media_entries(monkeypatch, bot):
+    entries = [
+        {"id": "0", "title": "t0", "summary": "s0", "link": "l0"},  # text-only
+        {"id": "1", "title": "t1", "summary": "s1", "link": "l1",
+         "images": ["https://cdn/i.jpg"]},
+    ]
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
+    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
+    # Only the media entry must reach the picker; index 0 is that single candidate.
+    pick = AsyncMock(return_value=0)
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
+    monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="p"))
+    monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
+
+    result = await pipeline.run_once(bot, _channel(require_media=True))
+
+    assert result.status == "posted"
+    assert result.detail == "t1"
+    candidates = pick.await_args.args[0]
+    assert [c["id"] for c in candidates] == ["1"]
+    bot.send_photo.assert_awaited_once_with(
+        chat_id="@chan", photo="https://cdn/i.jpg", caption="p"
+    )
 
 
 def test_runresult_str():

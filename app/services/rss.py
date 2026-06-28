@@ -24,36 +24,71 @@ def _entry_id(entry) -> str:
     return entry.get("id") or entry.get("guid") or entry.get("link") or entry.get("title", "")
 
 
-def _extract_image(entry) -> str:
-    """Best-effort image URL from common RSS/Atom places, else ''."""
+def _is_video(media) -> bool:
+    return (
+        str(media.get("medium", "")).lower() == "video"
+        or str(media.get("type", "")).lower().startswith("video")
+    )
+
+
+def _extract_images(entry) -> list[str]:
+    """All image URLs from common RSS/Atom places, in priority order, deduped.
+
+    media_content (non-video) first, then media_thumbnail, image enclosures, and
+    finally every <img> found in summary/content HTML. The first element is the
+    "primary" image (see _extract_image); the full list lets us post galleries.
+    """
+    urls: list[str] = []
+
+    def add(url: str | None) -> None:
+        url = (url or "").strip()
+        if url and url not in urls:
+            urls.append(url)
+
     for media in entry.get("media_content", []) or []:
-        url = media.get("url")
-        if url and str(media.get("medium", "image")).lower() != "video":
-            return url
+        if not _is_video(media):
+            add(media.get("url"))
     for thumb in entry.get("media_thumbnail", []) or []:
-        if thumb.get("url"):
-            return thumb["url"]
+        add(thumb.get("url"))
     for enc in entry.get("enclosures", []) or []:
-        if str(enc.get("type", "")).startswith("image/") and enc.get("href"):
-            return enc["href"]
-    # Fall back to the first <img> in summary/content HTML.
+        if str(enc.get("type", "")).startswith("image/"):
+            add(enc.get("href"))
     html_blobs = [entry.get("summary", "")]
     for c in entry.get("content", []) or []:
         html_blobs.append(c.get("value", ""))
     for blob in html_blobs:
-        m = _IMG_RE.search(blob or "")
-        if m:
-            return html.unescape(m.group(1))
+        for m in _IMG_RE.finditer(blob or ""):
+            add(html.unescape(m.group(1)))
+    return urls
+
+
+def _extract_image(entry) -> str:
+    """Best-effort single (primary) image URL, else ''."""
+    images = _extract_images(entry)
+    return images[0] if images else ""
+
+
+def _extract_video(entry) -> str:
+    """Best-effort video URL from media_content/enclosures, else ''."""
+    for media in entry.get("media_content", []) or []:
+        if _is_video(media) and media.get("url"):
+            return str(media["url"])
+    for enc in entry.get("enclosures", []) or []:
+        if str(enc.get("type", "")).startswith("video/") and enc.get("href"):
+            return enc["href"]
     return ""
 
 
 def _normalize(entry) -> dict:
+    images = _extract_images(entry)
     return {
         "id": _entry_id(entry),
         "title": _clean(entry.get("title", ""), 300),
         "summary": _clean(entry.get("summary", "")),
         "link": entry.get("link", ""),
-        "image": _extract_image(entry),
+        "image": images[0] if images else "",
+        "images": images,
+        "video": _extract_video(entry),
     }
 
 
