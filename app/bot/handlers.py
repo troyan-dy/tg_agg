@@ -14,7 +14,6 @@ never drops context.
 """
 from __future__ import annotations
 
-import logging
 import re
 
 from aiogram import Bot, F, Router
@@ -27,6 +26,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
+from loguru import logger as log
 
 from app.config import settings
 from app.models import Channel
@@ -41,8 +41,6 @@ from app.storage import (
     update_channel,
 )
 from app.tone import TONES, get_preset
-
-log = logging.getLogger("handlers")
 
 router = Router()
 # Only the admin may control the bot.
@@ -319,7 +317,7 @@ async def _try_add_channel(message: Message, bot: Bot, raw: str) -> None:
     try:
         chat = await bot.get_chat(ref)
     except Exception as exc:  # noqa: BLE001
-        log.warning("get_chat(%s) failed: %s", ref, exc)
+        log.warning("get_chat({}) failed: {}", ref, exc)
         await message.answer(
             "❌ Не нашёл такой канал. Проверь ссылку и что бот уже добавлен в канал."
         )
@@ -329,7 +327,7 @@ async def _try_add_channel(message: Message, bot: Bot, raw: str) -> None:
     try:
         member = await bot.get_chat_member(chat.id, me.id)
     except Exception as exc:  # noqa: BLE001
-        log.warning("get_chat_member failed for %s: %s", chat.id, exc)
+        log.warning("get_chat_member failed for {}: {}", chat.id, exc)
         await message.answer("❌ Бот не состоит в этом канале. Добавь его админом и повтори.")
         return
 
@@ -353,7 +351,7 @@ async def _try_add_channel(message: Message, bot: Bot, raw: str) -> None:
 
     channel = await add_channel(chat_id, title=chat.title)
     await set_selected_channel(channel.id)
-    log.info("Admin added channel %s (%s)", chat_id, chat.title)
+    log.info("Admin added channel {} ({})", chat_id, chat.title)
     await message.answer(
         "✅ Канал добавлен и выбран активным.\n"
         "Задай ему ленту (📝 «Сменить ленту»), часы и тон.\n\n"
@@ -368,7 +366,7 @@ async def _save_rss(message: Message, url: str) -> None:
     if channel is None:
         return
     await update_channel(channel.id, rss_url=url)
-    log.info("Admin set RSS url for channel %s: %s", channel.id, url)
+    log.info("Admin set RSS url for channel {}: {}", channel.id, url)
     channel.rss_url = url
     await message.answer(
         f"✅ RSS-лента канала <b>{_ch_label(channel)}</b> сохранена:\n{url}",
@@ -464,7 +462,7 @@ async def _do_run(message: Message, bot: Bot) -> None:
     channel = await _require_channel(message)
     if channel is None:
         return
-    log.info("Manual run for channel %s triggered by admin", channel.id)
+    log.info("Manual run for channel {} triggered by admin", channel.id)
     await message.answer(f"⏳ Запускаю разбор ленты канала <b>{_ch_label(channel)}</b>…")
     result = await run_once(bot, channel)
     replies = {
@@ -484,7 +482,7 @@ async def _do_preview(message: Message, bot: Bot) -> None:
     channel = await _require_channel(message)
     if channel is None:
         return
-    log.info("Manual preview for channel %s triggered by admin", channel.id)
+    log.info("Manual preview for channel {} triggered by admin", channel.id)
     await message.answer(
         f"⏳ Пробный прогон <b>{_ch_label(channel)}</b>: соберу пост сюда, "
         "без публикации и записи в базу…"
@@ -534,7 +532,7 @@ async def btn_toggle(message: Message) -> None:
     new_state = not channel.enabled
     await update_channel(channel.id, enabled=new_state)
     channel.enabled = new_state
-    log.info("Admin set enabled=%s for channel %s", new_state, channel.id)
+    log.info("Admin set enabled={} for channel {}", new_state, channel.id)
     word = "включён ▶️" if new_state else "выключен ⏸"
     await message.answer(
         f"Канал <b>{_ch_label(channel)}</b> {word}.", reply_markup=channel_kb(channel)
@@ -550,7 +548,7 @@ async def btn_toggle_media(message: Message) -> None:
     new_state = not channel.require_media
     await update_channel(channel.id, require_media=new_state)
     channel.require_media = new_state
-    log.info("Admin set require_media=%s for channel %s", new_state, channel.id)
+    log.info("Admin set require_media={} for channel {}", new_state, channel.id)
     word = (
         "только посты с картинкой или видео 🖼"
         if new_state
@@ -582,7 +580,7 @@ async def btn_delete_yes(message: Message) -> None:
         return
     label = _ch_label(channel)
     await delete_channel(channel.id)
-    log.info("Admin deleted channel %s", channel.id)
+    log.info("Admin deleted channel {}", channel.id)
     await message.answer(f"🗑 Канал <b>{label}</b> удалён.", reply_markup=await home_kb())
 
 
@@ -661,7 +659,7 @@ async def btn_select_tone(message: Message) -> None:
     key = TONE_BTN_TEXTS[message.text or ""]
     await update_channel(channel.id, tone=key)
     channel.tone = key
-    log.info("Admin set tone=%s for channel %s", key, channel.id)
+    log.info("Admin set tone={} for channel {}", key, channel.id)
     await message.answer(
         f"🎨 Тон: {TONES[key].label}\n{TONES[key].description}",
         reply_markup=tone_reply_kb(key),
@@ -753,7 +751,7 @@ async def fallback(message: Message) -> None:
         )
         if channel is not None:
             await set_selected_channel(channel.id)
-            log.info("Admin opened channel %s", channel.id)
+            log.info("Admin opened channel {}", channel.id)
             await message.answer(
                 _channel_header(channel), reply_markup=channel_kb(channel)
             )

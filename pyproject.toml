@@ -13,6 +13,7 @@ dependencies = [
     "openai>=1.30",
     "pydantic-settings>=2.1",
     "alembic>=1.18.5",
+    "loguru>=0.7.3",
 ]
 
 [dependency-groups]
@@ -39,7 +40,7 @@ addopts = "--cov=app --cov-report=term-missing --cov-fail-under=90"
 [tool.coverage.run]
 source = ["app"]
 # Process wiring / entrypoints — exercised at runtime, not by unit tests.
-omit = ["app/main.py", "app/scheduler/worker.py"]
+omit = ["app/main.py", "app/scheduler/worker.py", "app/logging_setup.py"]
 
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]

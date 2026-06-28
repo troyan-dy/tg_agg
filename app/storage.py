@@ -7,9 +7,9 @@ a single `settings` row.
 """
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta
 
+from loguru import logger as log
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -17,8 +17,6 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models import Channel, SeenItem, Setting
 from app.tone import get_preset
-
-log = logging.getLogger("storage")
 
 SELECTED_KEY = "selected_channel"
 
@@ -73,7 +71,7 @@ async def add_channel(chat_id: str, title: str | None = None) -> Channel:
         session.add(channel)
         await session.commit()
         await session.refresh(channel)
-    log.info("Channel added: %s (%s)", chat_id, title)
+    log.info("Channel added: {} ({})", chat_id, title)
     return channel
 
 
@@ -86,7 +84,7 @@ async def update_channel(channel_id: int, **fields: object) -> None:
             update(Channel).where(Channel.id == channel_id).values(**fields)
         )
         await session.commit()
-    log.info("Channel %s updated: %s", channel_id, fields)
+    log.info("Channel {} updated: {}", channel_id, fields)
 
 
 async def delete_channel(channel_id: int) -> None:
@@ -95,7 +93,7 @@ async def delete_channel(channel_id: int) -> None:
         await session.execute(delete(SeenItem).where(SeenItem.channel_id == channel_id))
         await session.execute(delete(Channel).where(Channel.id == channel_id))
         await session.commit()
-    log.info("Channel %s deleted", channel_id)
+    log.info("Channel {} deleted", channel_id)
 
 
 # --- Selected channel (what the chat controls act on) --------------------------
@@ -122,7 +120,7 @@ async def set_selected_channel(channel_id: int) -> None:
         else:
             session.add(Setting(key=SELECTED_KEY, value=value))
         await session.commit()
-    log.info("Selected channel set to %s", channel_id)
+    log.info("Selected channel set to {}", channel_id)
 
 
 # --- Dedup (channel-scoped) ----------------------------------------------------
@@ -217,6 +215,6 @@ async def mark_seen(
             )
         await session.commit()
     log.debug(
-        "Marked %d entries seen for channel %s (published=%s)",
+        "Marked {} entries seen for channel {} (published={})",
         len(rows), channel_id, published_id,
     )

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -13,16 +12,16 @@ from aiogram.types import (
     Message,
     TelegramObject,
 )
+from loguru import logger as log
 
 from app.bot.fsm_storage import DBStorage
 from app.bot.handlers import router, startup_notice
 from app.config import settings
 from app.db import run_migrations
+from app.logging_setup import setup_logging
 from app.pipeline import run_once
 from app.scheduler.worker import build_scheduler
 from app.storage import list_channels
-
-log = logging.getLogger("main")
 
 
 async def _run_all_on_startup(bot: Bot) -> None:
@@ -30,7 +29,7 @@ async def _run_all_on_startup(bot: Bot) -> None:
     for channel in await list_channels():
         if channel.enabled and channel.rss_url:
             result = await run_once(bot, channel)
-            log.info("Startup run for %s: %s", channel.chat_id, result)
+            log.info("Startup run for {}: {}", channel.chat_id, result)
 
 
 async def log_incoming(
@@ -42,7 +41,7 @@ async def log_incoming(
     if isinstance(event, Message):
         uid = event.from_user.id if event.from_user else None
         log.info(
-            "Incoming message from id=%s (admin_id=%s, allowed=%s): %r",
+            "Incoming message from id={} (admin_id={}, allowed={}): {!r}",
             uid, settings.admin_id, uid == settings.admin_id, event.text,
         )
     return await handler(event, data)
@@ -58,29 +57,15 @@ async def _set_commands(bot: Bot) -> None:
     await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=settings.admin_id))
 
 
-def _setup_logging() -> None:
-    logging.basicConfig(
-        level=settings.log_level.upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        # force=True so a second call (after Alembic's fileConfig swaps the root
-        # handler/level during migrations) actually re-applies our config.
-        force=True,
-    )
-    # Quiet down noisy third-party loggers; keep our own at the configured level.
-    for noisy in ("aiogram.event", "apscheduler", "httpx", "httpcore", "openai"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
-
-
 async def main() -> None:
-    _setup_logging()
-    log.info("Starting bot (admin_id=%s)", settings.admin_id)
+    setup_logging()
+    log.info("Starting bot (admin_id={})", settings.admin_id)
 
     await run_migrations()
-    # Alembic's env.py calls fileConfig(), which resets the root logger to
-    # WARNING with its own format. Re-apply our config so the bot's INFO logs
-    # are visible for the rest of the process (otherwise only migration output
-    # shows up in the container logs).
-    _setup_logging()
+    # Alembic's env.py calls fileConfig(), which resets the stdlib root handlers.
+    # loguru itself is untouched, but reinstall the stdlib→loguru intercept so
+    # third-party logs keep flowing for the rest of the process.
+    setup_logging()
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     # DB-backed FSM storage so a restart never drops a half-finished input flow.
@@ -99,7 +84,7 @@ async def main() -> None:
     try:
         await bot.send_message(settings.admin_id, await startup_notice())
     except Exception:
-        log.warning("Could not send startup notice to admin", exc_info=True)
+        log.opt(exception=True).warning("Could not send startup notice to admin")
 
     if settings.run_on_startup:
         asyncio.create_task(_run_all_on_startup(bot))

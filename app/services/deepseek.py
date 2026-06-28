@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-import logging
 
+from loguru import logger as log
 from openai import AsyncOpenAI
 
 from app.config import settings
 from app.tone import Tone, get_preset
-
-log = logging.getLogger("deepseek")
 
 _client: AsyncOpenAI | None = None
 
@@ -65,7 +63,7 @@ async def pick_most_relevant(candidates: list[dict], recent_titles: list[str] | 
         data = json.loads(resp.choices[0].message.content or "")
         index = int(data["index"])
         if 0 <= index < len(candidates):
-            log.info("Picked #%s: %s", index, data.get("reason", ""))
+            log.info("Picked #{}: {}", index, data.get("reason", ""))
             return index
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
         log.warning("Could not parse DeepSeek pick, defaulting to 0")

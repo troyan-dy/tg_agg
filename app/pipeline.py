@@ -1,8 +1,6 @@
 """One end-to-end run: RSS -> dedup -> DeepSeek pick -> generate -> publish."""
 from __future__ import annotations
 
-import logging
-
 from aiogram import Bot
 from aiogram.types import (
     InputMediaAudio,
@@ -11,6 +9,7 @@ from aiogram.types import (
     InputMediaPhoto,
     InputMediaVideo,
 )
+from loguru import logger as log
 
 from app.config import settings
 from app.models import Channel
@@ -22,8 +21,6 @@ from app.storage import (
     recent_published_titles,
 )
 from app.tone import get_preset
-
-log = logging.getLogger("pipeline")
 
 # Telegram caps photo captions at 1024 chars; plain messages allow more.
 _CAPTION_LIMIT = 1024
@@ -80,7 +77,7 @@ async def _publish(
             await bot.send_photo(chat_id=target, photo=images[0])
     except Exception as exc:  # noqa: BLE001
         # A dead/unsupported media URL must not block the post itself.
-        log.warning("Could not send media: %s — posting text only", exc)
+        log.warning("Could not send media: {} — posting text only", exc)
     await bot.send_message(chat_id=target, text=text, disable_web_page_preview=True)
 
 
@@ -106,7 +103,7 @@ async def run_once(
     target = chat_id if chat_id is not None else channel.chat_id
     url = channel.rss_url
     if not url:
-        log.info("Channel %s has no RSS url configured", channel.id)
+        log.info("Channel {} has no RSS url configured", channel.id)
         return RunResult("no_feed", "RSS-ссылка не задана. Установи её: /setrss <url>")
 
     entries = await rss.fetch_entries(url, limit=max(settings.max_candidates * 2, 50))
@@ -118,7 +115,7 @@ async def run_once(
     if channel.require_media:
         entries = [e for e in entries if _has_media(e)]
         if not entries:
-            log.info("Channel %s requires media but no entry carries any", channel.id)
+            log.info("Channel {} requires media but no entry carries any", channel.id)
             return RunResult("no_new", "Нет новостей с картинкой или видео для публикации.")
 
     ids = [e["id"] for e in entries]
@@ -133,14 +130,14 @@ async def run_once(
             : settings.max_candidates
         ]
         if candidates:
-            log.info("No fresh entries; falling back to %d seen-but-unposted", len(candidates))
+            log.info("No fresh entries; falling back to {} seen-but-unposted", len(candidates))
     if not candidates:
         log.info("Nothing to post — every feed entry is already published")
         return RunResult("no_new", "В ленте нет ничего, что ещё не было опубликовано.")
 
     recent = await recent_published_titles(channel.id)
     log.info(
-        "%d new candidates, %d posted in last 24h, asking DeepSeek to pick",
+        "{} new candidates, {} posted in last 24h, asking DeepSeek to pick",
         len(candidates), len(recent),
     )
     index = await deepseek.pick_most_relevant(candidates, recent)
@@ -162,5 +159,5 @@ async def run_once(
 
     if persist:
         await mark_seen(channel.id, candidates, published_id=chosen["id"])
-    log.info("Posted to %s: %s", channel.chat_id, chosen["title"])
+    log.info("Posted to {}: {}", channel.chat_id, chosen["title"])
     return RunResult("posted", chosen["title"])
