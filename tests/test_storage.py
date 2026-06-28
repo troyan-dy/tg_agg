@@ -70,6 +70,36 @@ async def test_set_run_hours_updates_existing(sqlite_session):
     assert await storage.get_run_hours() == [10, 14]
 
 
+# --- Tone ----------------------------------------------------------------------
+async def test_tone_env_fallback_when_unset(sqlite_session, monkeypatch):
+    monkeypatch.setattr(storage.settings, "post_tone", "expert")
+    assert await storage.get_stored_tone() is None
+    assert await storage.get_tone() == "expert"
+
+
+async def test_tone_unknown_env_degrades_to_default(sqlite_session, monkeypatch):
+    monkeypatch.setattr(storage.settings, "post_tone", "bogus")
+    assert await storage.get_tone() == storage.get_preset(None).key
+
+
+async def test_set_then_get_tone_wins_over_env(sqlite_session, monkeypatch):
+    monkeypatch.setattr(storage.settings, "post_tone", "news")
+    await storage.set_tone("hype")
+    assert await storage.get_stored_tone() == "hype"
+    assert await storage.get_tone() == "hype"
+
+
+async def test_set_tone_rejects_unknown(sqlite_session):
+    with pytest.raises(ValueError):
+        await storage.set_tone("nope")
+
+
+async def test_get_tone_preset_returns_object(sqlite_session):
+    await storage.set_tone("digest")
+    preset = await storage.get_tone_preset()
+    assert preset.key == "digest"
+
+
 async def test_db_value_wins_over_env(sqlite_session, monkeypatch):
     await storage.set_rss_url("https://from-db/feed")
     monkeypatch.setattr(storage.settings, "rss_url", "https://from-env/feed")

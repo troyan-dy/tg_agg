@@ -49,6 +49,8 @@ async def _set_commands(bot: Bot) -> None:
         BotCommand(command="setrss", description="📝 Сменить ленту"),
         BotCommand(command="hours", description="🕒 Часы публикации"),
         BotCommand(command="sethours", description="🕒 Сменить часы"),
+        BotCommand(command="tone", description="🎨 Тон постов"),
+        BotCommand(command="settone", description="🎨 Сменить тон"),
         BotCommand(command="status", description="📊 Статус"),
         BotCommand(command="help", description="❓ Помощь"),
     ]

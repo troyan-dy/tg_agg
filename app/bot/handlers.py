@@ -31,10 +31,15 @@ from app.storage import (
     get_run_hours,
     get_stored_rss_url,
     get_stored_run_hours,
+    get_stored_tone,
+    get_tone,
+    get_tone_preset,
     parse_run_hours,
     set_rss_url,
     set_run_hours,
+    set_tone,
 )
+from app.tone import TONES
 
 log = logging.getLogger("handlers")
 
@@ -46,6 +51,9 @@ router.callback_query.filter(F.from_user.id == settings.admin_id)
 # Callback-data prefix for the hour toggle grid: "hour:9" toggles 09:00.
 HOUR_CB = "hour:"
 HOURS_DONE_CB = "hours_done"
+# Callback-data for the tone picker: "tone:expert" selects the preset.
+TONE_CB = "tone:"
+TONE_DONE_CB = "tone_done"
 
 # --- Keyboard button labels (also matched as incoming text) --------------------
 BTN_RUN = "🚀 Запустить"
@@ -54,6 +62,7 @@ BTN_RSS = "📡 Лента"
 BTN_STATUS = "📊 Статус"
 BTN_SETRSS = "📝 Сменить ленту"
 BTN_SETHOURS = "🕒 Часы"
+BTN_TONE = "🎨 Тон"
 BTN_HELP = "❓ Помощь"
 BTN_CANCEL = "❌ Отмена"
 
@@ -65,7 +74,7 @@ def main_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=BTN_RUN), KeyboardButton(text=BTN_PREVIEW)],
             [KeyboardButton(text=BTN_RSS), KeyboardButton(text=BTN_STATUS)],
             [KeyboardButton(text=BTN_SETRSS), KeyboardButton(text=BTN_SETHOURS)],
-            [KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_TONE), KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -100,6 +109,21 @@ def hours_inline_kb(selected: set[int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def tone_inline_kb(current: str) -> InlineKeyboardMarkup:
+    """Radio-style tone picker: one row per preset, the active one marked ✅."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{'✅ ' if key == current else ''}{t.label}",
+                callback_data=f"{TONE_CB}{key}",
+            )
+        ]
+        for key, t in TONES.items()
+    ]
+    rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=TONE_DONE_CB)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 class SetRss(StatesGroup):
     """Conversational flow for the «📝 Сменить ленту» button."""
 
@@ -118,6 +142,9 @@ HELP = (
     "• 🕒 <code>/hours</code> — показать часы публикации\n"
     "• 🕒 <code>/sethours</code> — сетка часов: тапай, чтобы включать/выключать "
     f"(в {settings.timezone}); можно и текстом: <code>/sethours 9,13,18</code>\n"
+    "• 🎨 <code>/tone</code> — показать тон постов\n"
+    "• 🎨 <code>/settone</code> — выбрать тон постов кнопками "
+    "(или текстом: <code>/settone expert</code>)\n"
     "• 📊 <code>/status</code> — настройки и расписание\n"
     "• ❓ <code>/help</code> — эта справка"
 )
@@ -182,6 +209,39 @@ async def _show_hours_grid(message: Message) -> None:
     await message.answer(HOURS_GRID_PROMPT, reply_markup=hours_inline_kb(selected))
 
 
+async def _tone_source_suffix() -> str:
+    """ENV-fallback label for the tone, same convention as RSS/hours."""
+    return "" if await get_stored_tone() else " (из ENV — фолбэк)"
+
+
+async def _show_tone(message: Message) -> None:
+    tone = await get_tone_preset()
+    src = await _tone_source_suffix()
+    await message.answer(
+        f"🎨 Тон постов{src}: {tone.label}\n{tone.description}", reply_markup=main_kb()
+    )
+
+
+async def _apply_tone(message: Message, key: str) -> None:
+    await set_tone(key)
+    tone = TONES[key]
+    log.info("Admin set tone: %s", key)
+    await message.answer(
+        f"✅ Тон постов: {tone.label}\n{tone.description}", reply_markup=main_kb()
+    )
+
+
+def _tone_grid_prompt() -> str:
+    legend = "\n".join(f"{t.label} — {t.description}" for t in TONES.values())
+    return "🎨 Тон постов — выбери пресет (применяется сразу):\n\n" + legend
+
+
+async def _show_tone_grid(message: Message) -> None:
+    """Open the radio-style tone picker seeded with the current preset."""
+    current = await get_tone()
+    await message.answer(_tone_grid_prompt(), reply_markup=tone_inline_kb(current))
+
+
 async def _show_rss(message: Message) -> None:
     url = await get_rss_url()
     src = await _rss_source_suffix() if url else ""
@@ -200,10 +260,13 @@ async def _status_body() -> str:
     src = await _rss_source_suffix() if url else ""
     hours = await get_run_hours()
     hours_src = await _hours_source_suffix()
+    tone = await get_tone_preset()
+    tone_src = await _tone_source_suffix()
     return (
         f"📣 Канал: {settings.channel_id}\n"
         f"📡 RSS: {(url or '—')}{src}\n"
         f"🕒 Запуски: {_fmt_hours(hours)} ({settings.timezone}){hours_src}\n"
+        f"🎨 Тон: {tone.label}{tone_src}\n"
         f"🤖 Модель: {settings.deepseek_model}"
     )
 
@@ -295,6 +358,27 @@ async def cmd_sethours(message: Message, command: CommandObject) -> None:
     await _save_hours(message, hours)
 
 
+TONE_HINT = "Доступные пресеты: " + ", ".join(f"<code>{k}</code>" for k in TONES)
+
+
+@router.message(Command("tone"))
+async def cmd_tone(message: Message) -> None:
+    await _show_tone(message)
+
+
+@router.message(Command("settone"))
+async def cmd_settone(message: Message, command: CommandObject) -> None:
+    # No args → open the picker; an arg must be a known preset key.
+    arg = (command.args or "").strip().lower()
+    if not arg:
+        await _show_tone_grid(message)
+        return
+    if arg not in TONES:
+        await message.answer(TONE_HINT)
+        return
+    await _apply_tone(message, arg)
+
+
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
     await _show_status(message)
@@ -375,6 +459,40 @@ async def cb_hours_done(callback: CallbackQuery) -> None:
     if callback.message is not None:
         await cast(Message, callback.message).edit_text(
             f"🕒 Часы публикации: {_fmt_hours(hours)} ({settings.timezone})"
+        )
+    await callback.answer("Сохранено")
+
+
+# --- «Тон» picker (inline buttons) ---------------------------------------------
+@router.message(F.text == BTN_TONE)
+async def btn_tone(message: Message) -> None:
+    await _show_tone_grid(message)
+
+
+@router.callback_query(F.data.startswith(TONE_CB))
+async def cb_select_tone(callback: CallbackQuery) -> None:
+    """Select a tone preset, persist it, and refresh the picker."""
+    if not callback.data:  # guaranteed by the filter; narrows for mypy
+        return
+    key = callback.data.removeprefix(TONE_CB)
+    if key not in TONES:
+        await callback.answer()
+        return
+    await set_tone(key)
+    if callback.message is not None:
+        await cast(Message, callback.message).edit_reply_markup(
+            reply_markup=tone_inline_kb(key)
+        )
+    await callback.answer(f"Тон: {TONES[key].label}")
+
+
+@router.callback_query(F.data == TONE_DONE_CB)
+async def cb_tone_done(callback: CallbackQuery) -> None:
+    """Close the picker: replace it with a plain summary of the chosen tone."""
+    tone = await get_tone_preset()
+    if callback.message is not None:
+        await cast(Message, callback.message).edit_text(
+            f"🎨 Тон постов: {tone.label}\n{tone.description}"
         )
     await callback.answer("Сохранено")
 

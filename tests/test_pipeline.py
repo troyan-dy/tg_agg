@@ -7,6 +7,16 @@ import pytest
 
 from app import pipeline
 from app.config import settings
+from app.tone import get_preset
+
+
+@pytest.fixture(autouse=True)
+def _default_tone(monkeypatch):
+    """Pipeline reads the effective tone from the DB; default it for every test
+    so the generation path doesn't try to open a real session."""
+    monkeypatch.setattr(
+        pipeline, "get_tone_preset", AsyncMock(return_value=get_preset(None))
+    )
 
 
 @pytest.fixture
@@ -228,6 +238,25 @@ async def test_preview_publish_failure_skips_persist(monkeypatch, bot):
 
     assert result.status == "error"
     mark.assert_not_called()  # even on failure the preview leaves the DB untouched
+
+
+async def test_effective_tone_passed_to_generate(monkeypatch, bot):
+    entries = _entries(2)
+    monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
+    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0", "1"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=0))
+    gen = AsyncMock(return_value="p")
+    monkeypatch.setattr(pipeline.deepseek, "generate_post", gen)
+    monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
+    tone = get_preset("expert")
+    monkeypatch.setattr(pipeline, "get_tone_preset", AsyncMock(return_value=tone))
+
+    await pipeline.run_once(bot)
+
+    # generate_post(entry, tone) — the effective preset is forwarded.
+    assert gen.await_args.args[1] is tone
 
 
 def test_runresult_str():

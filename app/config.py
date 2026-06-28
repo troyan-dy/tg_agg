@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # Pipeline tuning
     max_candidates: int = 20  # newest unseen entries shown to DeepSeek
     post_language: str = "русском"
+    # Default post tone (a key from app.tone.TONES). Fallback only: the value set
+    # via chat (DB) wins. Unknown keys fall back to the default tone.
+    post_tone: str = "news"
 
     @property
     def run_hours_list(self) -> list[int]:

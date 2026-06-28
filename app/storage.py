@@ -10,11 +10,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.config import settings
 from app.db import SessionLocal
 from app.models import SeenItem, Setting
+from app.tone import TONES, Tone, get_preset
 
 log = logging.getLogger("storage")
 
 RSS_KEY = "rss_url"
 RUN_HOURS_KEY = "run_hours"
+TONE_KEY = "tone"
 
 
 def parse_run_hours(text: str) -> list[int]:
@@ -62,6 +64,42 @@ async def set_run_hours(hours: list[int]) -> None:
             session.add(Setting(key=RUN_HOURS_KEY, value=value))
         await session.commit()
     log.info("Run hours set to %s", value)
+
+
+async def get_stored_tone() -> str | None:
+    """Tone key set via chat (DB), or None if unset / no longer a known preset."""
+    async with SessionLocal() as session:
+        setting = await session.get(Setting, TONE_KEY)
+    if not setting or setting.value not in TONES:
+        return None
+    return setting.value
+
+
+async def get_tone() -> str:
+    """Effective tone key: the value set via chat (DB) wins; POST_TONE env is the
+    fallback. An unknown env value degrades to the default tone."""
+    stored = await get_stored_tone()
+    if stored is not None:
+        return stored
+    return get_preset(settings.post_tone).key
+
+
+async def get_tone_preset() -> Tone:
+    """The effective tone as a full preset object (for generation)."""
+    return get_preset(await get_tone())
+
+
+async def set_tone(key: str) -> None:
+    if key not in TONES:
+        raise ValueError(f"неизвестный пресет тона: {key}")
+    async with SessionLocal() as session:
+        setting = await session.get(Setting, TONE_KEY)
+        if setting:
+            setting.value = key
+        else:
+            session.add(Setting(key=TONE_KEY, value=key))
+        await session.commit()
+    log.info("Tone set to %s", key)
 
 
 async def get_stored_rss_url() -> str | None:

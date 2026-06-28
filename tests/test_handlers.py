@@ -8,6 +8,17 @@ import pytest
 
 from app.bot import handlers
 from app.pipeline import RunResult
+from app.tone import get_preset
+
+
+def _patch_status_deps(monkeypatch):
+    """Stub the storage reads behind _status_body / startup_notice."""
+    monkeypatch.setattr(handlers, "get_rss_url", AsyncMock(return_value="https://ex.com/f"))
+    monkeypatch.setattr(handlers, "get_stored_rss_url", AsyncMock(return_value="https://ex.com/f"))
+    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13, 18]))
+    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=[9, 13, 18]))
+    monkeypatch.setattr(handlers, "get_tone_preset", AsyncMock(return_value=get_preset("news")))
+    monkeypatch.setattr(handlers, "get_stored_tone", AsyncMock(return_value="news"))
 
 
 @pytest.mark.parametrize(
@@ -210,17 +221,106 @@ async def test_cb_hours_done_closes_grid(monkeypatch):
     assert "09:00" in cb.message.edit_text.await_args.args[0]
 
 
+# --- Tone picker (inline keyboard + callbacks) ---------------------------------
+async def test_cmd_tone_shows_current(monkeypatch):
+    monkeypatch.setattr(handlers, "get_tone_preset", AsyncMock(return_value=get_preset("expert")))
+    monkeypatch.setattr(handlers, "get_stored_tone", AsyncMock(return_value="expert"))
+    msg = _message()
+    await handlers.cmd_tone(msg)
+    out = msg.answer.await_args.args[0]
+    assert "Экспертный" in out
+    assert "ENV" not in out
+
+
+async def test_cmd_tone_marks_env_fallback(monkeypatch):
+    monkeypatch.setattr(handlers, "get_tone_preset", AsyncMock(return_value=get_preset("news")))
+    monkeypatch.setattr(handlers, "get_stored_tone", AsyncMock(return_value=None))
+    msg = _message()
+    await handlers.cmd_tone(msg)
+    assert "ENV" in msg.answer.await_args.args[0]
+
+
+async def test_cmd_settone_no_args_opens_grid(monkeypatch):
+    monkeypatch.setattr(handlers, "get_tone", AsyncMock(return_value="news"))
+    msg = _message()
+    await handlers.cmd_settone(msg, SimpleNamespace(args=None))
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.InlineKeyboardMarkup)
+
+
+async def test_cmd_settone_text_applies(monkeypatch):
+    set_tone = AsyncMock()
+    monkeypatch.setattr(handlers, "set_tone", set_tone)
+    msg = _message()
+    await handlers.cmd_settone(msg, SimpleNamespace(args="  EXPERT "))
+    set_tone.assert_awaited_once_with("expert")  # lowercased
+    assert "Экспертный" in msg.answer.await_args.args[0]
+
+
+async def test_cmd_settone_rejects_unknown(monkeypatch):
+    set_tone = AsyncMock()
+    monkeypatch.setattr(handlers, "set_tone", set_tone)
+    msg = _message()
+    await handlers.cmd_settone(msg, SimpleNamespace(args="bogus"))
+    set_tone.assert_not_called()
+    assert "пресет" in msg.answer.await_args.args[0]
+
+
+async def test_btn_tone_opens_grid(monkeypatch):
+    monkeypatch.setattr(handlers, "get_tone", AsyncMock(return_value="news"))
+    msg = _message()
+    await handlers.btn_tone(msg)
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.InlineKeyboardMarkup)
+
+
+def test_tone_inline_kb_marks_current():
+    kb = handlers.tone_inline_kb("expert")
+    texts = [b.text for row in kb.inline_keyboard for b in row]
+    assert any(t.startswith("✅") and "Экспертный" in t for t in texts)
+    assert sum("Готово" in t for t in texts) == 1
+
+
+async def test_cb_select_tone_persists(monkeypatch):
+    set_tone = AsyncMock()
+    monkeypatch.setattr(handlers, "set_tone", set_tone)
+    cb = _callback("tone:hype")
+
+    await handlers.cb_select_tone(cb)
+
+    set_tone.assert_awaited_once_with("hype")
+    cb.message.edit_reply_markup.assert_awaited_once()
+
+
+async def test_cb_select_tone_ignores_unknown(monkeypatch):
+    set_tone = AsyncMock()
+    monkeypatch.setattr(handlers, "set_tone", set_tone)
+    cb = _callback("tone:bogus")
+
+    await handlers.cb_select_tone(cb)
+
+    set_tone.assert_not_called()
+
+
+async def test_cb_tone_done_closes_picker(monkeypatch):
+    monkeypatch.setattr(handlers, "get_tone_preset", AsyncMock(return_value=get_preset("digest")))
+    cb = _callback("tone_done")
+
+    await handlers.cb_tone_done(cb)
+
+    cb.message.edit_text.assert_awaited_once()
+    assert "Тезисный" in cb.message.edit_text.await_args.args[0]
+
+
 async def test_startup_notice_includes_settings(monkeypatch):
-    monkeypatch.setattr(handlers, "get_rss_url", AsyncMock(return_value="https://ex.com/f"))
-    monkeypatch.setattr(handlers, "get_stored_rss_url", AsyncMock(return_value="https://ex.com/f"))
-    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13]))
-    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=[9, 13]))
+    _patch_status_deps(monkeypatch)
 
     text = await handlers.startup_notice()
 
     assert "перезапущен" in text
     assert "https://ex.com/f" in text
     assert "09:00" in text
+    assert "Новостной" in text
 
 
 async def test_cmd_run_reports_posted(monkeypatch):
@@ -275,15 +375,13 @@ async def test_btn_run_delegates_to_run(monkeypatch):
 
 
 async def test_btn_status_shows_status(monkeypatch):
-    monkeypatch.setattr(handlers, "get_rss_url", AsyncMock(return_value="https://ex.com/f"))
-    monkeypatch.setattr(handlers, "get_stored_rss_url", AsyncMock(return_value="https://ex.com/f"))
-    monkeypatch.setattr(handlers, "get_run_hours", AsyncMock(return_value=[9, 13, 18]))
-    monkeypatch.setattr(handlers, "get_stored_run_hours", AsyncMock(return_value=[9, 13, 18]))
+    _patch_status_deps(monkeypatch)
     msg = _message()
     await handlers.btn_status(msg)
     out = msg.answer.await_args.args[0]
     assert "https://ex.com/f" in out
     assert "09:00" in out
+    assert "Новостной" in out  # tone label present
 
 
 async def test_btn_setrss_enters_waiting_state():

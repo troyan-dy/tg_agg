@@ -85,3 +85,15 @@ async def test_generate_post_strips_whitespace(patch_client):
     assert await deepseek.generate_post(entry) == "<b>Post</b>"
     # Sanity: it issued exactly one completion call.
     assert client.chat.completions.create.await_count == 1
+
+
+async def test_generate_post_applies_tone(patch_client):
+    from app.tone import get_preset
+
+    client = patch_client("<b>p</b>")
+    tone = get_preset("ironic")
+    await deepseek.generate_post({"title": "T", "summary": "S", "link": "l"}, tone)
+
+    kwargs = client.chat.completions.create.await_args.kwargs
+    assert kwargs["temperature"] == tone.temperature
+    assert tone.fragment in kwargs["messages"][0]["content"]

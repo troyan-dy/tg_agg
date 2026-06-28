@@ -8,6 +8,7 @@ import logging
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.tone import Tone, get_preset
 
 log = logging.getLogger("deepseek")
 
@@ -71,16 +72,22 @@ async def pick_most_relevant(candidates: list[dict], recent_titles: list[str] | 
     return 0
 
 
-async def generate_post(entry: dict) -> str:
-    """Generate a ready-to-send Telegram post (HTML) for a news entry."""
+async def generate_post(entry: dict, tone: Tone | None = None) -> str:
+    """Generate a ready-to-send Telegram post (HTML) for a news entry.
+
+    `tone` controls the voice/format (the per-channel preset); the structural
+    requirements below stay constant. Defaults to the default preset.
+    """
+    tone = tone or get_preset(None)
     prompt = (
         f"Напиши пост для Telegram-канала СТРОГО на {settings.post_language} языке "
         "по этой новости.\n"
         f"Заголовок: {entry['title']}\n"
         f"Описание: {entry.get('summary', '')}\n"
         f"Ссылка: {entry.get('link', '')}\n\n"
+        f"Тон и подача: {tone.fragment}\n\n"
         "Требования:\n"
-        "- 2–5 коротких абзацев, живо и по делу, без воды и кликбейта.\n"
+        "- 2–5 коротких абзацев, без воды и кликбейта.\n"
         "- Допустима только Telegram HTML-разметка: <b>, <i>, <a href>. Без markdown.\n"
         "- В конце добавь ссылку на источник через <a href>.\n"
         "- Не используй заголовки markdown и эмодзи-спам (1–2 уместных эмодзи максимум).\n"
@@ -89,6 +96,6 @@ async def generate_post(entry: dict) -> str:
     resp = await _get_client().chat.completions.create(
         model=settings.deepseek_model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
+        temperature=tone.temperature,
     )
     return (resp.choices[0].message.content or "").strip()

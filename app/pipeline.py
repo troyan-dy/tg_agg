@@ -10,6 +10,7 @@ from app.services import deepseek, rss
 from app.storage import (
     filter_unseen,
     get_rss_url,
+    get_tone_preset,
     mark_seen,
     published_among,
     recent_published_titles,
@@ -72,7 +73,8 @@ async def run_once(
     chosen = candidates[index]
 
     try:
-        text = await deepseek.generate_post(chosen)
+        tone = await get_tone_preset()
+        text = await deepseek.generate_post(chosen, tone)
         await bot.send_message(chat_id=target, text=text, disable_web_page_preview=False)
     except Exception as exc:  # noqa: BLE001
         log.exception("Publishing failed")
