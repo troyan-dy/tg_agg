@@ -28,7 +28,9 @@ def _message():
 
 
 def _callback(data: str):
-    message = SimpleNamespace(edit_reply_markup=AsyncMock(), edit_text=AsyncMock())
+    message = SimpleNamespace(
+        edit_reply_markup=AsyncMock(), edit_text=AsyncMock(), answer=AsyncMock()
+    )
     return SimpleNamespace(data=data, answer=AsyncMock(), message=message)
 
 
@@ -207,6 +209,11 @@ async def test_cb_select_channel(monkeypatch):
 
     sel.assert_awaited_once_with(3)
     cb.message.edit_reply_markup.assert_awaited_once()
+    # Screen 2 opens: a header message with the per-channel keyboard.
+    cb.message.answer.assert_awaited_once()
+    kb = cb.message.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
+    assert handlers.BTN_BACK in {b.text for row in kb.keyboard for b in row}
 
 
 async def test_cb_delete_ask_confirms(monkeypatch):
@@ -232,6 +239,49 @@ async def test_cb_delete_yes_deletes(monkeypatch):
     await handlers.cb_delete_channel_yes(cb)
 
     dele.assert_awaited_once_with(4)
+    # Keyboard is resynced after deletion (no channels left → home keyboard).
+    cb.message.answer.assert_awaited_once()
+
+
+# --- Two-screen navigation: back / toggle / delete -----------------------------
+async def test_btn_back_shows_channels(monkeypatch):
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[]))
+    _select(monkeypatch, None)
+    msg = _message()
+
+    await handlers.btn_back(msg)
+
+    # First message carries the top-level (home) keyboard.
+    kb = msg.answer.await_args_list[0].kwargs["reply_markup"]
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
+    labels = {b.text for row in kb.keyboard for b in row}
+    assert handlers.BTN_ADDCHANNEL in labels and handlers.BTN_BACK not in labels
+
+
+async def test_btn_toggle_flips_enabled(monkeypatch):
+    _select(monkeypatch, _channel(id=1, enabled=True))
+    upd = AsyncMock()
+    monkeypatch.setattr(handlers, "update_channel", upd)
+    msg = _message()
+
+    await handlers.btn_toggle(msg)
+
+    upd.assert_awaited_once_with(1, enabled=False)
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    # Now disabled → keyboard offers the «enable» label.
+    assert handlers.BTN_ENABLE in {b.text for row in kb.keyboard for b in row}
+
+
+async def test_btn_delete_asks_confirmation(monkeypatch):
+    _select(monkeypatch, _channel(id=7, title="G"))
+    msg = _message()
+
+    await handlers.btn_delete(msg)
+
+    kb = msg.answer.await_args.kwargs["reply_markup"]
+    assert isinstance(kb, handlers.InlineKeyboardMarkup)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert f"{handlers.CH_DELYES_CB}7" in cbs
 
 
 # --- Add-channel FSM -----------------------------------------------------------
