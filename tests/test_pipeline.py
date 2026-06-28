@@ -78,8 +78,9 @@ async def test_posted_happy_path(monkeypatch, bot):
     assert result.status == "posted"
     assert result.detail == "t1"  # the picked entry's title
     bot.send_message.assert_awaited_once_with(
-        chat_id=settings.channel_id, text="<b>post</b>", disable_web_page_preview=False
+        chat_id=settings.channel_id, text="<b>post</b>", disable_web_page_preview=True
     )
+    bot.send_photo.assert_not_called()  # this entry carries no image
     # All candidates marked seen, with the chosen one flagged as published.
     args, kwargs = mark.await_args
     assert args[0] == entries
@@ -216,7 +217,7 @@ async def test_preview_sends_to_chat_and_skips_persist(monkeypatch, bot):
     assert result.status == "posted"
     # Post goes to the given chat, not the channel...
     bot.send_message.assert_awaited_once_with(
-        chat_id=42, text="<b>p</b>", disable_web_page_preview=False
+        chat_id=42, text="<b>p</b>", disable_web_page_preview=True
     )
     # ...and nothing is written to the DB.
     mark.assert_not_called()
@@ -257,6 +258,52 @@ async def test_effective_tone_passed_to_generate(monkeypatch, bot):
 
     # generate_post(entry, tone) — the effective preset is forwarded.
     assert gen.await_args.args[1] is tone
+
+
+async def test_publish_short_post_with_image_uses_caption(bot):
+    await pipeline._publish(bot, 7, "<b>post</b>", "https://cdn/p.jpg")
+    bot.send_photo.assert_awaited_once_with(
+        chat_id=7, photo="https://cdn/p.jpg", caption="<b>post</b>"
+    )
+    bot.send_message.assert_not_called()
+
+
+async def test_publish_long_post_with_image_splits(bot):
+    text = "x" * (pipeline._CAPTION_LIMIT + 1)
+    await pipeline._publish(bot, 7, text, "https://cdn/p.jpg")
+    # Image first as its own message, full text after — nothing truncated.
+    bot.send_photo.assert_awaited_once_with(chat_id=7, photo="https://cdn/p.jpg")
+    bot.send_message.assert_awaited_once_with(
+        chat_id=7, text=text, disable_web_page_preview=True
+    )
+
+
+async def test_publish_falls_back_to_text_when_image_fails(bot):
+    bot.send_photo.side_effect = RuntimeError("bad image url")
+    await pipeline._publish(bot, 7, "post", "https://cdn/dead.jpg")
+    # A dead image must not block the post.
+    bot.send_message.assert_awaited_once_with(
+        chat_id=7, text="post", disable_web_page_preview=True
+    )
+
+
+async def test_posted_with_image_sends_photo(monkeypatch, bot):
+    entries = [{"id": "0", "title": "t0", "summary": "s0", "image": "https://cdn/i.jpg"}]
+    monkeypatch.setattr(pipeline, "get_rss_url", AsyncMock(return_value="http://f"))
+    monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=entries))
+    monkeypatch.setattr(pipeline, "filter_unseen", AsyncMock(return_value={"0"}))
+    monkeypatch.setattr(pipeline, "recent_published_titles", AsyncMock(return_value=[]))
+    monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", AsyncMock(return_value=0))
+    monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="<b>p</b>"))
+    monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
+
+    result = await pipeline.run_once(bot)
+
+    assert result.status == "posted"
+    bot.send_photo.assert_awaited_once_with(
+        chat_id=settings.channel_id, photo="https://cdn/i.jpg", caption="<b>p</b>"
+    )
+    bot.send_message.assert_not_called()
 
 
 def test_runresult_str():

@@ -11,6 +11,7 @@ import feedparser
 log = logging.getLogger("rss")
 
 _TAG_RE = re.compile(r"<[^>]+>")
+_IMG_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.IGNORECASE)
 
 
 def _clean(text: str, limit: int = 400) -> str:
@@ -23,12 +24,36 @@ def _entry_id(entry) -> str:
     return entry.get("id") or entry.get("guid") or entry.get("link") or entry.get("title", "")
 
 
+def _extract_image(entry) -> str:
+    """Best-effort image URL from common RSS/Atom places, else ''."""
+    for media in entry.get("media_content", []) or []:
+        url = media.get("url")
+        if url and str(media.get("medium", "image")).lower() != "video":
+            return url
+    for thumb in entry.get("media_thumbnail", []) or []:
+        if thumb.get("url"):
+            return thumb["url"]
+    for enc in entry.get("enclosures", []) or []:
+        if str(enc.get("type", "")).startswith("image/") and enc.get("href"):
+            return enc["href"]
+    # Fall back to the first <img> in summary/content HTML.
+    html_blobs = [entry.get("summary", "")]
+    for c in entry.get("content", []) or []:
+        html_blobs.append(c.get("value", ""))
+    for blob in html_blobs:
+        m = _IMG_RE.search(blob or "")
+        if m:
+            return html.unescape(m.group(1))
+    return ""
+
+
 def _normalize(entry) -> dict:
     return {
         "id": _entry_id(entry),
         "title": _clean(entry.get("title", ""), 300),
         "summary": _clean(entry.get("summary", "")),
         "link": entry.get("link", ""),
+        "image": _extract_image(entry),
     }
 
 

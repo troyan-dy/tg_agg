@@ -18,6 +18,27 @@ from app.storage import (
 
 log = logging.getLogger("pipeline")
 
+# Telegram caps photo captions at 1024 chars; plain messages allow more.
+_CAPTION_LIMIT = 1024
+
+
+async def _publish(bot: Bot, target: int | str, text: str, image: str) -> None:
+    """Send the post, attaching the article image when there is one.
+
+    If the post is longer than a photo caption allows, the image goes first as
+    its own message and the full text follows, so nothing gets truncated.
+    """
+    if image:
+        try:
+            if len(text) <= _CAPTION_LIMIT:
+                await bot.send_photo(chat_id=target, photo=image, caption=text)
+                return
+            await bot.send_photo(chat_id=target, photo=image)
+        except Exception as exc:  # noqa: BLE001
+            # A dead/unsupported image URL must not block the post itself.
+            log.warning("Could not send image %s: %s — posting text only", image, exc)
+    await bot.send_message(chat_id=target, text=text, disable_web_page_preview=True)
+
 
 class RunResult:
     def __init__(self, status: str, detail: str = ""):
@@ -75,7 +96,7 @@ async def run_once(
     try:
         tone = await get_tone_preset()
         text = await deepseek.generate_post(chosen, tone)
-        await bot.send_message(chat_id=target, text=text, disable_web_page_preview=False)
+        await _publish(bot, target, text, chosen.get("image", ""))
     except Exception as exc:  # noqa: BLE001
         log.exception("Publishing failed")
         # Mark the rest as seen but NOT the failed one, so we can retry it later.

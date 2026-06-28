@@ -40,7 +40,48 @@ def test_normalize_shape():
         "title": "Title",
         "summary": "Summary",
         "link": "https://example.com/a",
+        "image": "",
     }
+
+
+def test_extract_image_prefers_media_content():
+    entry = {
+        "media_content": [{"url": "https://cdn/img.jpg", "medium": "image"}],
+        "media_thumbnail": [{"url": "https://cdn/thumb.jpg"}],
+    }
+    assert rss._extract_image(entry) == "https://cdn/img.jpg"
+
+
+def test_extract_image_skips_video_media_content():
+    entry = {
+        "media_content": [{"url": "https://cdn/clip.mp4", "medium": "video"}],
+        "media_thumbnail": [{"url": "https://cdn/thumb.jpg"}],
+    }
+    assert rss._extract_image(entry) == "https://cdn/thumb.jpg"
+
+
+def test_extract_image_uses_image_enclosure():
+    entry = {
+        "enclosures": [
+            {"type": "audio/mp3", "href": "https://cdn/a.mp3"},
+            {"type": "image/png", "href": "https://cdn/pic.png"},
+        ]
+    }
+    assert rss._extract_image(entry) == "https://cdn/pic.png"
+
+
+def test_extract_image_falls_back_to_html_img():
+    entry = {"summary": 'text <img src="https://cdn/in-body.jpg?a=1&amp;b=2"> more'}
+    assert rss._extract_image(entry) == "https://cdn/in-body.jpg?a=1&b=2"
+
+
+def test_extract_image_scans_content_html():
+    entry = {"content": [{"value": "<p>hi</p><img src='https://cdn/c.gif'/>"}]}
+    assert rss._extract_image(entry) == "https://cdn/c.gif"
+
+
+def test_extract_image_absent_returns_empty():
+    assert rss._extract_image({"summary": "no media here"}) == ""
 
 
 async def test_fetch_entries_normalizes_limits_and_drops_idless(monkeypatch):
