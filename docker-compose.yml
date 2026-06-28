@@ -6,7 +6,9 @@ services:
       POSTGRES_PASSWORD: tg
       POSTGRES_DB: tg_agg
     ports:
-      - "5432:5432"
+      # Bind only to the host loopback: psql from the host still works, but the
+      # port is not reachable from the internet (avoids port-scanner noise in logs).
+      - "127.0.0.1:5432:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data
     healthcheck:
