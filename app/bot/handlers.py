@@ -57,10 +57,8 @@ HOUR_CB = "hour:"           # "hour:9" toggles 09:00 for the selected channel
 HOURS_DONE_CB = "hours_done"
 TONE_CB = "tone:"           # "tone:expert" selects the preset
 TONE_DONE_CB = "tone_done"
-CH_SEL_CB = "chsel:"        # "chsel:3" makes channel #3 active
-CH_DEL_CB = "chdel:"        # ask to delete channel #3
 CH_DELYES_CB = "chdelyes:"  # confirm deletion of channel #3
-CH_ADD_CB = "chadd"         # start the add-channel flow
+CH_DELNO_CB = "chdelno"     # cancel a delete confirmation
 
 # --- Keyboard button labels (also matched as incoming text) --------------------
 BTN_RUN = "🚀 Запустить"
@@ -80,17 +78,20 @@ BTN_DISABLE = "⏸ Выключить"
 BTN_DELETE = "🗑 Удалить"
 
 
-def home_kb() -> ReplyKeyboardMarkup:
-    """Top-level keyboard (no channel chosen): add a channel + global actions.
+async def home_kb() -> ReplyKeyboardMarkup:
+    """Screen 1 keyboard: one reply button per channel, then «add» + global
+    actions. Tapping a channel opens its settings (Screen 2, см. channel_kb).
 
-    The channel list/selection itself is the inline message under it; the daily
-    per-channel actions appear only after a channel is opened (см. channel_kb).
-    """
+    Channel buttons carry the channel's label as text; the catch-all handler
+    matches that text back to the channel (см. fallback)."""
+    channels = await list_channels()
+    rows: list[list[KeyboardButton]] = [
+        [KeyboardButton(text=_ch_label(c))] for c in channels
+    ]
+    rows.append([KeyboardButton(text=BTN_ADDCHANNEL)])
+    rows.append([KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_HELP)])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_ADDCHANNEL)],
-            [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_HELP)],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Выбери канал или добавь новый…",
@@ -119,7 +120,7 @@ async def _active_kb() -> ReplyKeyboardMarkup:
     """Keyboard matching the current screen: channel actions if one is active,
     otherwise the top-level keyboard."""
     channel = await get_selected_channel()
-    return channel_kb(channel) if channel else home_kb()
+    return channel_kb(channel) if channel else await home_kb()
 
 
 def cancel_kb(placeholder: str) -> ReplyKeyboardMarkup:
@@ -161,23 +162,6 @@ def tone_inline_kb(current: str) -> InlineKeyboardMarkup:
         for key, t in TONES.items()
     ]
     rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=TONE_DONE_CB)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def channels_inline_kb(channels: list[Channel], selected_id: int | None) -> InlineKeyboardMarkup:
-    """List of channels: tap a name to make it active (✅), 🗑 to delete, plus an
-    «add» row at the bottom."""
-    rows: list[list[InlineKeyboardButton]] = []
-    for c in channels:
-        mark = "✅ " if c.id == selected_id else ""
-        name = mark + (c.title or c.chat_id)
-        rows.append(
-            [
-                InlineKeyboardButton(text=name, callback_data=f"{CH_SEL_CB}{c.id}"),
-                InlineKeyboardButton(text="🗑", callback_data=f"{CH_DEL_CB}{c.id}"),
-            ]
-        )
-    rows.append([InlineKeyboardButton(text=BTN_ADDCHANNEL, callback_data=CH_ADD_CB)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -253,25 +237,25 @@ async def _require_channel(message: Message) -> Channel | None:
     if channel is None:
         await message.answer(
             "Сначала добавь канал: «➕ Добавить канал» или /addchannel.",
-            reply_markup=home_kb(),
+            reply_markup=await home_kb(),
         )
     return channel
 
 
 # --- Channels: list / select / delete / add ------------------------------------
-CHANNELS_PROMPT = "📺 Каналы — тапни по названию, чтобы сделать активным (✅); 🗑 — удалить."
+CHANNELS_PROMPT = (
+    "📺 Каналы — выбери канал на клавиатуре ниже, чтобы открыть его настройки, "
+    "или «➕ Добавить канал»."
+)
 
 
 async def _show_channels(message: Message) -> None:
-    """Screen 1: switch to the top-level keyboard and show the inline channel
-    list (tap a name to open its settings, 🗑 to delete, ➕ to add)."""
+    """Screen 1: the reply keyboard lists every channel as a button (tap to open
+    its settings) plus «➕ Добавить канал»."""
     channels = await list_channels()
-    selected = await get_selected_channel()
-    sel_id = selected.id if selected else None
-    await message.answer("📺 Каналы", reply_markup=home_kb())
     await message.answer(
         CHANNELS_PROMPT if channels else "📺 Каналов пока нет. Добавь первый:",
-        reply_markup=channels_inline_kb(channels, sel_id),
+        reply_markup=await home_kb(),
     )
 
 
@@ -346,7 +330,7 @@ async def _try_add_channel(message: Message, bot: Bot, raw: str) -> None:
 
     chat_id = str(chat.id)
     if await get_channel_by_chat(chat_id):
-        await message.answer("ℹ️ Этот канал уже добавлен.", reply_markup=home_kb())
+        await message.answer("ℹ️ Этот канал уже добавлен.", reply_markup=await home_kb())
         return
 
     channel = await add_channel(chat_id, title=chat.title)
@@ -681,7 +665,7 @@ async def btn_delete(message: Message) -> None:
                 InlineKeyboardButton(
                     text="🗑 Удалить", callback_data=f"{CH_DELYES_CB}{channel.id}"
                 ),
-                InlineKeyboardButton(text="↩️ Отмена", callback_data="chlist"),
+                InlineKeyboardButton(text="↩️ Отмена", callback_data=CH_DELNO_CB),
             ]
         ]
     )
@@ -792,36 +776,7 @@ async def cb_tone_done(callback: CallbackQuery) -> None:
     await callback.answer("Сохранено")
 
 
-# --- Channels (inline buttons) -------------------------------------------------
-async def _refresh_channels(callback: CallbackQuery) -> None:
-    channels = await list_channels()
-    selected = await get_selected_channel()
-    sel_id = selected.id if selected else None
-    if callback.message is not None:
-        await cast(Message, callback.message).edit_reply_markup(
-            reply_markup=channels_inline_kb(channels, sel_id)
-        )
-
-
-@router.callback_query(F.data.startswith(CH_SEL_CB))
-async def cb_select_channel(callback: CallbackQuery) -> None:
-    if not callback.data:
-        return
-    channel = await get_channel(int(callback.data.removeprefix(CH_SEL_CB)))
-    if channel is None:
-        await callback.answer("Канал не найден", show_alert=True)
-        await _refresh_channels(callback)
-        return
-    await set_selected_channel(channel.id)
-    await _refresh_channels(callback)
-    await callback.answer(f"Активный канал: {_ch_label(channel)}")
-    # Open Screen 2: the per-channel settings keyboard with a fresh header.
-    if callback.message is not None:
-        await cast(Message, callback.message).answer(
-            _channel_header(channel), reply_markup=channel_kb(channel)
-        )
-
-
+# --- Channel deletion confirmation (inline yes/no) -----------------------------
 @router.callback_query(F.data.startswith(CH_DELYES_CB))
 async def cb_delete_channel_yes(callback: CallbackQuery) -> None:
     if not callback.data:
@@ -829,58 +784,20 @@ async def cb_delete_channel_yes(callback: CallbackQuery) -> None:
     channel_id = int(callback.data.removeprefix(CH_DELYES_CB))
     channel = await get_channel(channel_id)
     await delete_channel(channel_id)
-    await _refresh_channels(callback)
     await callback.answer(f"Удалён: {_ch_label(channel)}" if channel else "Удалён")
-    # The active channel may have changed (or be gone) — resync the keyboard.
+    # Drop the confirmation buttons and return to Screen 1 (the active channel may
+    # now be gone, so resync the reply keyboard to the channel list).
     if callback.message is not None:
-        await cast(Message, callback.message).answer(
-            "🗑 Канал удалён.", reply_markup=await _active_kb()
-        )
+        msg = cast(Message, callback.message)
+        await msg.edit_text("🗑 Канал удалён.")
+        await msg.answer(CHANNELS_PROMPT, reply_markup=await home_kb())
 
 
-@router.callback_query(F.data.startswith(CH_DEL_CB))
-async def cb_delete_channel_ask(callback: CallbackQuery) -> None:
-    if not callback.data:
-        return
-    channel_id = int(callback.data.removeprefix(CH_DEL_CB))
-    channel = await get_channel(channel_id)
-    if channel is None:
-        await callback.answer("Канал не найден", show_alert=True)
-        return
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🗑 Удалить", callback_data=f"{CH_DELYES_CB}{channel_id}"
-                ),
-                InlineKeyboardButton(text="↩️ Отмена", callback_data="chlist"),
-            ]
-        ]
-    )
+@router.callback_query(F.data == CH_DELNO_CB)
+async def cb_delete_channel_no(callback: CallbackQuery) -> None:
+    """«↩️ Отмена» on the delete confirmation — just drop the buttons."""
     if callback.message is not None:
-        await cast(Message, callback.message).edit_text(
-            f"Удалить канал <b>{_ch_label(channel)}</b> и всю его историю публикаций?",
-            reply_markup=kb,
-        )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "chlist")
-async def cb_back_to_channels(callback: CallbackQuery) -> None:
-    channels = await list_channels()
-    selected = await get_selected_channel()
-    sel_id = selected.id if selected else None
-    if callback.message is not None:
-        await cast(Message, callback.message).edit_text(
-            CHANNELS_PROMPT, reply_markup=channels_inline_kb(channels, sel_id)
-        )
-    await callback.answer()
-
-
-@router.callback_query(F.data == CH_ADD_CB)
-async def cb_add_channel(callback: CallbackQuery, state: FSMContext) -> None:
-    if callback.message is not None:
-        await _start_add_channel(cast(Message, callback.message), state)
+        await cast(Message, callback.message).edit_text("Отменено — канал не удалён.")
     await callback.answer()
 
 
@@ -947,9 +864,27 @@ async def setrss_receive(message: Message, state: FSMContext) -> None:
     await _save_rss(message, url)
 
 
-# --- Fallback ------------------------------------------------------------------
+# --- Channel pick / fallback ---------------------------------------------------
 @router.message()
 async def fallback(message: Message) -> None:
+    """Catch-all: a tap on a channel button (its label as text) opens Screen 2;
+    anything else is an unknown command.
+
+    Channel buttons live on the home keyboard and carry the channel label as
+    plain text, so they have no dedicated handler — we match the text against the
+    channel list here, after every reserved button has had its turn."""
+    text = (message.text or "").strip()
+    if text:
+        channel = next(
+            (c for c in await list_channels() if _ch_label(c) == text), None
+        )
+        if channel is not None:
+            await set_selected_channel(channel.id)
+            log.info("Admin opened channel %s", channel.id)
+            await message.answer(
+                _channel_header(channel), reply_markup=channel_kb(channel)
+            )
+            return
     await message.answer(
         "Не понял 🤔 Выбери действие на клавиатуре ниже или загляни в ❓ /help.",
         reply_markup=await _active_kb(),

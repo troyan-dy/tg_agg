@@ -23,8 +23,8 @@ def _channel(
     )
 
 
-def _message():
-    return SimpleNamespace(answer=AsyncMock())
+def _message(text: str | None = None):
+    return SimpleNamespace(text=text, answer=AsyncMock())
 
 
 def _callback(data: str):
@@ -183,10 +183,11 @@ async def test_show_channels_lists(monkeypatch):
 
     await handlers._show_channels(msg)
 
+    # Screen 1 is now a reply keyboard: one button per channel + «add».
     kb = msg.answer.await_args.kwargs["reply_markup"]
-    assert isinstance(kb, handlers.InlineKeyboardMarkup)
-    texts = [b.text for row in kb.inline_keyboard for b in row]
-    assert any("✅" in t and "A" in t for t in texts)
+    assert isinstance(kb, handlers.ReplyKeyboardMarkup)
+    texts = {b.text for row in kb.keyboard for b in row}
+    assert {"A", "B", handlers.BTN_ADDCHANNEL} <= texts
 
 
 async def test_show_channels_empty(monkeypatch):
@@ -196,35 +197,29 @@ async def test_show_channels_empty(monkeypatch):
     assert "Каналов пока нет" in msg.answer.await_args.args[0]
 
 
-async def test_cb_select_channel(monkeypatch):
+async def test_tap_channel_opens_settings(monkeypatch):
+    """Tapping a channel button (its label as text) selects it and opens Screen 2."""
     ch = _channel(id=3, title="C")
-    monkeypatch.setattr(handlers, "get_channel", AsyncMock(return_value=ch))
+    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[ch]))
     sel = AsyncMock()
     monkeypatch.setattr(handlers, "set_selected_channel", sel)
-    monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=[ch]))
-    _select(monkeypatch, ch)
-    cb = _callback("chsel:3")
+    msg = _message(text="C")
 
-    await handlers.cb_select_channel(cb)
+    await handlers.fallback(msg)
 
     sel.assert_awaited_once_with(3)
-    cb.message.edit_reply_markup.assert_awaited_once()
-    # Screen 2 opens: a header message with the per-channel keyboard.
-    cb.message.answer.assert_awaited_once()
-    kb = cb.message.answer.await_args.kwargs["reply_markup"]
+    kb = msg.answer.await_args.kwargs["reply_markup"]
     assert isinstance(kb, handlers.ReplyKeyboardMarkup)
     assert handlers.BTN_BACK in {b.text for row in kb.keyboard for b in row}
 
 
-async def test_cb_delete_ask_confirms(monkeypatch):
-    ch = _channel(id=4, title="D")
-    monkeypatch.setattr(handlers, "get_channel", AsyncMock(return_value=ch))
-    cb = _callback("chdel:4")
+async def test_cb_delete_no_cancels(monkeypatch):
+    cb = _callback(handlers.CH_DELNO_CB)
 
-    await handlers.cb_delete_channel_ask(cb)
+    await handlers.cb_delete_channel_no(cb)
 
     cb.message.edit_text.assert_awaited_once()
-    assert "Удалить" in cb.message.edit_text.await_args.args[0]
+    assert "не удалён" in cb.message.edit_text.await_args.args[0]
 
 
 async def test_cb_delete_yes_deletes(monkeypatch):
