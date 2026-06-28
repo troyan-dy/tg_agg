@@ -12,5 +12,4 @@ pgdata/
 htmlcov/
 
 # auto-deploy runtime files
-deploy/auto-update.log
-deploy/.auto-update.lock
+deploy/*
