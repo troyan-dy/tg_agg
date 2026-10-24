@@ -9,10 +9,10 @@ import pytest
 from app.services import deepseek
 
 
-def _fake_client(content: str) -> SimpleNamespace:
-    """Build a stand-in for AsyncOpenAI returning `content` from the LLM."""
+def _fake_client(answer: str) -> SimpleNamespace:
+    """Build a stand-in for AsyncOpenAI returning `answer` from the LLM."""
     resp = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        choices=[SimpleNamespace(message=SimpleNamespace(content=answer))]
     )
     create = AsyncMock(return_value=resp)
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
@@ -20,8 +20,8 @@ def _fake_client(content: str) -> SimpleNamespace:
 
 @pytest.fixture
 def patch_client(monkeypatch):
-    def _install(content: str):
-        client = _fake_client(content)
+    def _install(answer: str):
+        client = _fake_client(answer)
         monkeypatch.setattr(deepseek, "_get_client", lambda: client)
         return client
 
@@ -30,9 +30,10 @@ def patch_client(monkeypatch):
 
 async def test_pick_single_candidate_short_circuits(monkeypatch):
     # Must not even touch the client when there's only one option.
-    monkeypatch.setattr(
-        deepseek, "_get_client", lambda: (_ for _ in ()).throw(AssertionError("called"))
-    )
+    def _must_not_be_called():
+        raise AssertionError("called")
+
+    monkeypatch.setattr(deepseek, "_get_client", _must_not_be_called)
     assert await deepseek.pick_most_relevant([{"title": "only"}]) == 0
 
 

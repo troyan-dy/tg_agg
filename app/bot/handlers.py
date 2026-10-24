@@ -15,6 +15,8 @@ never drops context.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
@@ -22,6 +24,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    ChatFullInfo,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -81,7 +84,7 @@ async def home_kb() -> ReplyKeyboardMarkup:
     matches that text back to the channel (см. fallback)."""
     channels = await list_channels()
     rows: list[list[KeyboardButton]] = [
-        [KeyboardButton(text=_ch_label(c))] for c in channels
+        [KeyboardButton(text=_ch_label(channel))] for channel in channels
     ]
     rows.append([KeyboardButton(text=BTN_ADDCHANNEL)])
     rows.append([KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_HELP)])
@@ -129,8 +132,14 @@ def cancel_kb(placeholder: str) -> ReplyKeyboardMarkup:
     )
 
 
+def _hh(hour: int) -> str:
+    """Zero-padded two-digit hour: 9 → "09"."""
+    return str(hour).zfill(2)
+
+
 def _hour_btn_text(hour: int, on: bool) -> str:
-    return f"{'✅' if on else '▫️'} {hour:02d}"
+    mark = "✅" if on else "▫️"
+    return f"{mark} {_hh(hour)}"
 
 
 def hours_reply_kb(selected: set[int]) -> ReplyKeyboardMarkup:
@@ -139,8 +148,8 @@ def hours_reply_kb(selected: set[int]) -> ReplyKeyboardMarkup:
     closes the editor. Four columns keep all 24 buttons readable on a phone."""
     rows: list[list[KeyboardButton]] = []
     row: list[KeyboardButton] = []
-    for h in range(24):
-        row.append(KeyboardButton(text=_hour_btn_text(h, h in selected)))
+    for hour in range(24):
+        row.append(KeyboardButton(text=_hour_btn_text(hour, hour in selected)))
         if len(row) == 4:
             rows.append(row)
             row = []
@@ -153,21 +162,28 @@ def hours_reply_kb(selected: set[int]) -> ReplyKeyboardMarkup:
 
 
 def _tone_btn_text(key: str, active: bool) -> str:
-    return f"{'✅ ' if active else ''}{TONES[key].label}"
+    prefix = "✅ " if active else ""
+    return f"{prefix}{TONES[key].label}"
 
 
 # Every possible tone-button caption (with and without the active ✅) → its key,
 # so a tap on a tone button can be matched and resolved back to the preset.
-TONE_BTN_TEXTS: dict[str, str] = {}
-for _key in TONES:
-    TONE_BTN_TEXTS[_tone_btn_text(_key, False)] = _key
-    TONE_BTN_TEXTS[_tone_btn_text(_key, True)] = _key
+def _build_tone_btn_texts() -> Mapping[str, str]:
+    texts: dict[str, str] = {}
+    for key in TONES:
+        texts[_tone_btn_text(key, False)] = key
+        texts[_tone_btn_text(key, True)] = key
+    return MappingProxyType(texts)
+
+
+TONE_BTN_TEXTS = _build_tone_btn_texts()
 
 
 def tone_reply_kb(current: str) -> ReplyKeyboardMarkup:
     """Radio-style tone picker as a reply keyboard: one button per preset, the
     active one marked ✅. «Готово» closes the editor."""
-    rows = [[KeyboardButton(text=_tone_btn_text(key, key == current))] for key in TONES]
+    buttons = (KeyboardButton(text=_tone_btn_text(key, key == current)) for key in TONES)
+    rows = [[button] for button in buttons]
     rows.append([KeyboardButton(text=BTN_DONE)])
     return ReplyKeyboardMarkup(
         keyboard=rows,
@@ -231,7 +247,7 @@ def _ch_label(channel: Channel) -> str:
 
 
 def _fmt_hours(hours: list[int]) -> str:
-    return ", ".join(f"{h:02d}:00" for h in hours)
+    return ", ".join(f"{hh}:00" for hh in map(_hh, hours))
 
 
 def _channel_header(channel: Channel) -> str:
@@ -239,9 +255,10 @@ def _channel_header(channel: Channel) -> str:
     tone = get_preset(channel.tone)
     state = "▶️ включён" if channel.enabled else "⏸ выключен"
     media = "🖼 только с медиа" if channel.require_media else "📝 любые посты"
+    feed = channel.rss_url or "— лента не задана"
     return (
         f"⚙️ Настройка канала: <b>{_ch_label(channel)}</b>\n"
-        f"📡 {channel.rss_url or '— лента не задана'}\n"
+        f"📡 {feed}\n"
         f"🕒 {_fmt_hours(channel.hours_list)} ({settings.timezone}) · "
         f"🎨 {tone.label} · {state} · {media}"
     )
@@ -278,30 +295,95 @@ async def _show_channels(message: Message) -> None:
 _REF_RE = re.compile(r"(?:https?://)?(?:t|telegram)\.me/(?P<rest>.+)", re.IGNORECASE)
 
 
+def _parse_tme_path(rest: str) -> str | None:
+    """The chat ref behind a t.me/<rest> link, or None for invite links."""
+    rest = rest.strip("/")
+    priv = re.match(r"c/(\d+)", rest)  # private link t.me/c/<id>/<msg>
+    if priv:
+        return f"-100{priv.group(1)}"
+    first = rest.split("/")[0].split("?")[0]
+    if not first or first == "joinchat" or first.startswith("+"):
+        return None  # invite link — can't be resolved via the API
+    return f"@{first}"
+
+
 def _parse_channel_ref(text: str) -> str | None:
     """Turn admin input into something bot.get_chat accepts: a @username or a
     numeric id. Returns None for invite links / unrecognised input."""
     text = text.strip()
-    if not text:
-        return None
-    if re.fullmatch(r"-?\d+", text):  # raw numeric id, e.g. -1001234567890
+    # @username or a raw numeric id, e.g. -1001234567890
+    if text.startswith("@") or re.fullmatch(r"-?\d+", text):
         return text
-    if text.startswith("@"):
-        return text
-    m = _REF_RE.fullmatch(text)
-    if m:
-        rest = m.group("rest").strip("/")
-        priv = re.match(r"c/(\d+)", rest)  # private link t.me/c/<id>/<msg>
-        if priv:
-            return f"-100{priv.group(1)}"
-        first = rest.split("/")[0].split("?")[0]
-        if not first or first == "joinchat" or first.startswith("+"):
-            return None  # invite link — can't be resolved via the API
-        return f"@{first}"
+    link = _REF_RE.fullmatch(text)
+    if link:
+        return _parse_tme_path(link.group("rest"))
     # Bare username without @, e.g. "mychannel"
     if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,}", text):
         return f"@{text}"
     return None
+
+
+async def _resolve_chat(message: Message, bot: Bot, ref: str) -> ChatFullInfo | None:
+    """bot.get_chat(ref), or None (after telling the admin) when it fails."""
+    try:
+        return await bot.get_chat(ref)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_chat({}) failed: {}", ref, exc)
+    await message.answer(
+        "❌ Не нашёл такой канал. Проверь ссылку и что бот уже добавлен в канал."
+    )
+    return None
+
+
+def _member_can_post(member: object) -> bool:
+    """Whether a chat member (the bot) may publish: creator, or admin with the right."""
+    status = getattr(member, "status", None)
+    if status == ChatMemberStatus.CREATOR:
+        return True
+    if status == ChatMemberStatus.ADMINISTRATOR:
+        return bool(getattr(member, "can_post_messages", False))
+    return False
+
+
+async def _check_can_post(message: Message, bot: Bot, chat: ChatFullInfo) -> bool:
+    """Verify the bot is in the channel with posting rights; tell the admin if not."""
+    me = await bot.me()
+    try:
+        member = await bot.get_chat_member(chat.id, me.id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_chat_member failed for {}: {}", chat.id, exc)
+        await message.answer("❌ Бот не состоит в этом канале. Добавь его админом и повтори.")
+        return False
+    if not _member_can_post(member):
+        await message.answer(
+            "❌ Бот не админ канала или у него нет права публиковать сообщения. "
+            "Дай боту права администратора с публикацией и повтори."
+        )
+        return False
+    return True
+
+
+async def _save_new_channel(chat_id: str, title: str | None) -> Channel:
+    channel = await add_channel(chat_id, title=title)
+    await set_selected_channel(channel.id)
+    log.info("Admin added channel {} ({})", chat_id, title)
+    return channel
+
+
+async def _store_channel(message: Message, chat: ChatFullInfo) -> None:
+    """Save the verified channel and make it active (unless it already exists)."""
+    chat_id = str(chat.id)
+    if await get_channel_by_chat(chat_id):
+        await message.answer("ℹ️ Этот канал уже добавлен.", reply_markup=await home_kb())
+        return
+
+    channel = await _save_new_channel(chat_id, chat.title)
+    await message.answer(
+        "✅ Канал добавлен и выбран активным.\n"
+        "Задай ему ленту (📝 «Сменить ленту»), часы и тон.\n\n"
+        f"{_channel_header(channel)}",
+        reply_markup=channel_kb(channel),
+    )
 
 
 async def _try_add_channel(message: Message, bot: Bot, raw: str) -> None:
@@ -314,50 +396,9 @@ async def _try_add_channel(message: Message, bot: Bot, raw: str) -> None:
             "бота в канал и пришли его @username."
         )
         return
-    try:
-        chat = await bot.get_chat(ref)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("get_chat({}) failed: {}", ref, exc)
-        await message.answer(
-            "❌ Не нашёл такой канал. Проверь ссылку и что бот уже добавлен в канал."
-        )
-        return
-
-    me = await bot.me()
-    try:
-        member = await bot.get_chat_member(chat.id, me.id)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("get_chat_member failed for {}: {}", chat.id, exc)
-        await message.answer("❌ Бот не состоит в этом канале. Добавь его админом и повтори.")
-        return
-
-    if member.status == ChatMemberStatus.CREATOR:
-        can_post = True
-    elif member.status == ChatMemberStatus.ADMINISTRATOR:
-        can_post = bool(getattr(member, "can_post_messages", False))
-    else:
-        can_post = False
-    if not can_post:
-        await message.answer(
-            "❌ Бот не админ канала или у него нет права публиковать сообщения. "
-            "Дай боту права администратора с публикацией и повтори."
-        )
-        return
-
-    chat_id = str(chat.id)
-    if await get_channel_by_chat(chat_id):
-        await message.answer("ℹ️ Этот канал уже добавлен.", reply_markup=await home_kb())
-        return
-
-    channel = await add_channel(chat_id, title=chat.title)
-    await set_selected_channel(channel.id)
-    log.info("Admin added channel {} ({})", chat_id, chat.title)
-    await message.answer(
-        "✅ Канал добавлен и выбран активным.\n"
-        "Задай ему ленту (📝 «Сменить ленту»), часы и тон.\n\n"
-        + _channel_header(channel),
-        reply_markup=channel_kb(channel),
-    )
+    chat = await _resolve_chat(message, bot, ref)
+    if chat is not None and await _check_can_post(message, bot, chat):
+        await _store_channel(message, chat)
 
 
 # --- RSS (selected channel) ----------------------------------------------------
@@ -407,8 +448,9 @@ async def _show_hours_grid(message: Message) -> None:
 
 # --- Tone (selected channel) ---------------------------------------------------
 def _tone_grid_prompt() -> str:
-    legend = "\n".join(f"{t.label} — {t.description}" for t in TONES.values())
-    return "🎨 Тон постов — выбери пресет (применяется сразу):\n\n" + legend
+    lines = (f"{tone.label} — {tone.description}" for tone in TONES.values())
+    legend = "\n".join(lines)
+    return f"🎨 Тон постов — выбери пресет (применяется сразу):\n\n{legend}"
 
 
 async def _show_tone_grid(message: Message) -> None:
@@ -423,38 +465,41 @@ async def _show_tone_grid(message: Message) -> None:
 
 
 # --- Status --------------------------------------------------------------------
+def _status_block(channel: Channel, selected_id: int | None) -> str:
+    """One channel's lines in the status summary."""
+    head = "▶️" if channel.id == selected_id else "•"
+    off = "" if channel.enabled else "  ⏸ выключен"
+    media = "  🖼 только с медиа" if channel.require_media else ""
+    feed = channel.rss_url or "— не задана"
+    return (
+        f"{head} <b>{_ch_label(channel)}</b>{off}{media}\n"
+        f"   📡 {feed}\n"
+        f"   🕒 {_fmt_hours(channel.hours_list)} ({settings.timezone})\n"
+        f"   🎨 {get_preset(channel.tone).label}"
+    )
+
+
 async def _status_body() -> str:
     """A summary of every channel and its settings, marking the active one."""
     channels = await list_channels()
     if not channels:
         return "Каналов пока нет. Добавь первый: «➕ Добавить канал»."
     selected = await get_selected_channel()
-    sel_id = selected.id if selected else None
-    blocks = []
-    for c in channels:
-        head = "▶️" if c.id == sel_id else "•"
-        tone = get_preset(c.tone)
-        off = "" if c.enabled else "  ⏸ выключен"
-        media = "  🖼 только с медиа" if c.require_media else ""
-        blocks.append(
-            f"{head} <b>{_ch_label(c)}</b>{off}{media}\n"
-            f"   📡 {c.rss_url or '— не задана'}\n"
-            f"   🕒 {_fmt_hours(c.hours_list)} ({settings.timezone})\n"
-            f"   🎨 {tone.label}"
-        )
-    return f"🤖 Модель: {settings.deepseek_model}\n\n" + "\n\n".join(blocks)
+    selected_id = selected.id if selected else None
+    blocks = "\n\n".join(_status_block(channel, selected_id) for channel in channels)
+    return f"🤖 Модель: {settings.deepseek_model}\n\n{blocks}"
 
 
 async def _show_status(message: Message) -> None:
-    await message.answer(
-        "📊 <b>Статус</b>\n" + await _status_body(), reply_markup=await _active_kb()
-    )
+    body = await _status_body()
+    await message.answer(f"📊 <b>Статус</b>\n{body}", reply_markup=await _active_kb())
 
 
 async def startup_notice() -> str:
     """Message sent to the admin every time the service (re)starts: a heads-up
     plus the current settings, so a silent crash-restart is never a surprise."""
-    return "♻️ <b>Сервис перезапущен</b>\n" + await _status_body()
+    body = await _status_body()
+    return f"♻️ <b>Сервис перезапущен</b>\n{body}"
 
 
 # --- Run / preview (selected channel) ------------------------------------------
@@ -464,15 +509,15 @@ async def _do_run(message: Message, bot: Bot) -> None:
         return
     log.info("Manual run for channel {} triggered by admin", channel.id)
     await message.answer(f"⏳ Запускаю разбор ленты канала <b>{_ch_label(channel)}</b>…")
-    result = await run_once(bot, channel)
+    outcome = await run_once(bot, channel)
     replies = {
-        "posted": f"✅ Опубликовано в <b>{_ch_label(channel)}</b>: {result.detail}",
+        "posted": f"✅ Опубликовано в <b>{_ch_label(channel)}</b>: {outcome.detail}",
         "no_feed": "⚠️ RSS-лента не задана. Нажми «📝 Сменить ленту».",
         "no_new": "ℹ️ Новых новостей нет.",
-        "error": f"❌ Ошибка: {result.detail}",
+        "error": f"❌ Ошибка: {outcome.detail}",
     }
     await message.answer(
-        replies.get(result.status, str(result)), reply_markup=channel_kb(channel)
+        replies.get(outcome.status, str(outcome)), reply_markup=channel_kb(channel)
     )
 
 
@@ -487,15 +532,15 @@ async def _do_preview(message: Message, bot: Bot) -> None:
         f"⏳ Пробный прогон <b>{_ch_label(channel)}</b>: соберу пост сюда, "
         "без публикации и записи в базу…"
     )
-    result = await run_once(bot, channel, chat_id=settings.admin_id, persist=False)
+    outcome = await run_once(bot, channel, chat_id=settings.admin_id, persist=False)
     replies = {
         "posted": "☝️ Так выглядел бы пост. В канал не отправлено, база не тронута.",
         "no_feed": "⚠️ RSS-лента не задана. Нажми «📝 Сменить ленту».",
         "no_new": "ℹ️ Новых новостей нет.",
-        "error": f"❌ Ошибка: {result.detail}",
+        "error": f"❌ Ошибка: {outcome.detail}",
     }
     await message.answer(
-        replies.get(result.status, str(result)), reply_markup=channel_kb(channel)
+        replies.get(outcome.status, str(outcome)), reply_markup=channel_kb(channel)
     )
 
 
@@ -626,10 +671,10 @@ async def btn_toggle_hour(message: Message) -> None:
     channel = await _require_channel(message)
     if channel is None:
         return
-    m = HOUR_BTN_RE.match(message.text or "")
-    if m is None:  # guaranteed by the filter; narrows for type-checkers
+    match = HOUR_BTN_RE.match(message.text or "")
+    if match is None:  # guaranteed by the filter; narrows for type-checkers
         return
-    hour = int(m.group(1))
+    hour = int(match.group(1))
     selected = set(channel.hours_list)
     if hour in selected:
         if len(selected) == 1:
@@ -642,7 +687,8 @@ async def btn_toggle_hour(message: Message) -> None:
         selected.discard(hour)
     else:
         selected.add(hour)
-    await update_channel(channel.id, run_hours=",".join(str(h) for h in sorted(selected)))
+    hours_csv = ",".join(str(hour_on) for hour_on in sorted(selected))
+    await update_channel(channel.id, run_hours=hours_csv)
     await message.answer(
         f"🕒 {_fmt_hours(sorted(selected))} ({settings.timezone})",
         reply_markup=hours_reply_kb(selected),
@@ -747,7 +793,7 @@ async def fallback(message: Message) -> None:
     text = (message.text or "").strip()
     if text:
         channel = next(
-            (c for c in await list_channels() if _ch_label(c) == text), None
+            (cand for cand in await list_channels() if _ch_label(cand) == text), None
         )
         if channel is not None:
             await set_selected_channel(channel.id)

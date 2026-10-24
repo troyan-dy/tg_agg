@@ -109,7 +109,7 @@ docker compose logs -f bot
 
 Пайплайн [.github/workflows/ci.yml](.github/workflows/ci.yml):
 
-- **Job `test`** (на каждый push и PR в `main`): `ruff` → `mypy` → `pytest` через `uv`.
+- **Job `test`** (на каждый push и PR в `main`): `ruff` → `WPS` → `mypy` → `pytest` через `uv`.
 - **Job `build-push`** (только push в `main`, после зелёных тестов): собирает образ
   `bot` и пушит в **GHCR** — `ghcr.io/troyan-dy/tg_agg` с тегами `latest` и `<sha>`
   (sha — для отката на конкретный коммит). Сборка идёт **в Actions, не на сервере**,
@@ -220,16 +220,21 @@ URL базы и metadata берутся из `app.config`/`app.models` (`migrati
 Все технические проверки одной командой ([Makefile](Makefile)):
 
 ```bash
-make check        # ruff → mypy → pytest (останавливается на первой ошибке)
+make check        # ruff → WPS → mypy → pytest (останавливается на первой ошибке)
 ```
 
 Отдельные цели, если нужно прогнать что-то одно:
 
 ```bash
 make lint         # uv run ruff check .
+make wps          # uv run flake8 . --select=WPS (wemake-python-styleguide, конфиг в setup.cfg)
 make types        # uv run mypy
 make test         # uv run pytest -q (покрытие включено, падает ниже порога)
 ```
+
+В облачных сессиях Claude Code зависимости ставит SessionStart-хук
+([.claude/hooks/session-start.sh](.claude/hooks/session-start.sh), `uv sync --frozen`),
+так что `make check` работает сразу. Локально хук ничего не делает.
 
 ### Подготовка
 

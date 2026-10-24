@@ -7,14 +7,21 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 
+# Column sizes (part of the schema — keep in sync with migrations).
+_KEY_LEN = 64
+_CHAT_ID_LEN = 64
+_TONE_LEN = 32
+_RUN_HOURS_LEN = 128
+_ENTRY_ID_LEN = 512
+
 
 class Setting(Base):
     """Simple key/value store (used for the admin's currently selected channel)."""
 
     __tablename__ = "settings"
 
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    value: Mapped[str] = mapped_column(Text)
+    key: Mapped[str] = mapped_column(String(_KEY_LEN), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)  # noqa: WPS110 - column name is part of the schema
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -31,11 +38,11 @@ class Channel(Base):
     __tablename__ = "channels"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    chat_id: Mapped[str] = mapped_column(String(64), unique=True)
+    chat_id: Mapped[str] = mapped_column(String(_CHAT_ID_LEN), unique=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     rss_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    tone: Mapped[str] = mapped_column(String(32), default="news")
-    run_hours: Mapped[str] = mapped_column(String(128), default="9,13,18")
+    tone: Mapped[str] = mapped_column(String(_TONE_LEN), default="news")
+    run_hours: Mapped[str] = mapped_column(String(_RUN_HOURS_LEN), default="9,13,18")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # When True, only entries carrying an image or video are published; text-only
     # entries are skipped. server_default keeps existing rows valid after the
@@ -49,7 +56,7 @@ class Channel(Base):
 
     @property
     def hours_list(self) -> list[int]:
-        return [int(h) for h in self.run_hours.split(",") if h.strip()]
+        return [int(hour) for hour in self.run_hours.split(",") if hour.strip()]
 
 
 class SeenItem(Base):
@@ -65,7 +72,7 @@ class SeenItem(Base):
         Integer, ForeignKey("channels.id", ondelete="CASCADE"), primary_key=True
     )
     # Stable entry id: feed's <guid>/<id> or, as a fallback, the link.
-    entry_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    entry_id: Mapped[str] = mapped_column(String(_ENTRY_ID_LEN), primary_key=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     link: Mapped[str | None] = mapped_column(Text, nullable=True)
     published: Mapped[bool] = mapped_column(Boolean, default=False)

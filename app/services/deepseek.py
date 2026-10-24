@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import cache
 
 from loguru import logger as log
 from openai import AsyncOpenAI
@@ -10,16 +11,62 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.tone import Tone, get_preset
 
-_client: AsyncOpenAI | None = None
+# Low temperature: picking a story is a ranking task, not a creative one.
+_PICK_TEMPERATURE = 0.3
 
 
+@cache
 def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI(
-            api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url
-        )
-    return _client
+    return AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
+
+
+def _build_pick_prompt(candidates: list[dict], recent_titles: list[str] | None) -> str:
+    listing = "\n".join(
+        f"{num}. {cand['title']}\n   {cand.get('summary', '')}"
+        for num, cand in enumerate(candidates)
+    )
+    published = (
+        "\n".join(f"- {title}" for title in recent_titles)
+        if recent_titles
+        else "(за последние сутки ничего не публиковалось)"
+    )
+    return (
+        "Ты редактор Telegram-канала и подбираешь следующую публикацию.\n\n"
+        "Уже опубликовано за последние сутки:\n"
+        f"{published}\n\n"
+        "Свежие новости-кандидаты (ещё не публиковались):\n"
+        f"{listing}\n\n"
+        "Выбери ОДНУ новость для публикации прямо сейчас. Она должна быть важной и "
+        "актуальной, но при этом РАЗНООБРАЗИТЬ ленту: по теме и сюжету отличаться "
+        "от уже опубликованного выше — не повторяй недавние темы. Если несколько "
+        "кандидатов про одно и то же, предпочти новость из другой тематики.\n"
+        'Ответь строго JSON-объектом вида {"index": <число>, "reason": "<кратко>"}.'
+    )
+
+
+def _extract_pick(answer: str) -> tuple[int, str] | None:
+    """(index, reason) from the model's JSON answer, or None if it can't be parsed."""
+    try:
+        payload = json.loads(answer)
+    except ValueError:  # json.JSONDecodeError is a ValueError
+        return None
+    try:
+        return int(payload["index"]), payload.get("reason", "")
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _parse_pick(answer: str, count: int) -> int:
+    """Picked index; 0 when the answer is unparsable or out of range."""
+    pick = _extract_pick(answer)
+    if pick is None:
+        log.warning("Could not parse DeepSeek pick, defaulting to 0")
+        return 0
+    index, reason = pick
+    if 0 <= index < count:
+        log.info("Picked #{}: {}", index, reason)
+        return index
+    return 0
 
 
 async def pick_most_relevant(candidates: list[dict], recent_titles: list[str] | None = None) -> int:
@@ -33,41 +80,13 @@ async def pick_most_relevant(candidates: list[dict], recent_titles: list[str] | 
     if len(candidates) == 1:
         return 0
 
-    listing = "\n".join(
-        f"{i}. {c['title']}\n   {c.get('summary', '')}" for i, c in enumerate(candidates)
-    )
-    published = (
-        "\n".join(f"- {t}" for t in recent_titles)
-        if recent_titles
-        else "(за последние сутки ничего не публиковалось)"
-    )
-    prompt = (
-        "Ты редактор Telegram-канала и подбираешь следующую публикацию.\n\n"
-        "Уже опубликовано за последние сутки:\n"
-        f"{published}\n\n"
-        "Свежие новости-кандидаты (ещё не публиковались):\n"
-        f"{listing}\n\n"
-        "Выбери ОДНУ новость для публикации прямо сейчас. Она должна быть важной и "
-        "актуальной, но при этом РАЗНООБРАЗИТЬ ленту: по теме и сюжету отличаться "
-        "от уже опубликованного выше — не повторяй недавние темы. Если несколько "
-        "кандидатов про одно и то же, предпочти новость из другой тематики.\n"
-        'Ответь строго JSON-объектом вида {"index": <число>, "reason": "<кратко>"}.'
-    )
     resp = await _get_client().chat.completions.create(
         model=settings.deepseek_model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": _build_pick_prompt(candidates, recent_titles)}],
         response_format={"type": "json_object"},
-        temperature=0.3,
+        temperature=_PICK_TEMPERATURE,
     )
-    try:
-        data = json.loads(resp.choices[0].message.content or "")
-        index = int(data["index"])
-        if 0 <= index < len(candidates):
-            log.info("Picked #{}: {}", index, data.get("reason", ""))
-            return index
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-        log.warning("Could not parse DeepSeek pick, defaulting to 0")
-    return 0
+    return _parse_pick(resp.choices[0].message.content or "", len(candidates))
 
 
 async def generate_post(entry: dict, tone: Tone | None = None) -> str:

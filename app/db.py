@@ -15,7 +15,7 @@ _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 
 class Base(DeclarativeBase):
-    pass
+    """Declarative base for all ORM models."""
 
 
 def _alembic_config():
@@ -33,7 +33,7 @@ async def run_migrations() -> None:
     """
     from alembic import command
 
-    import app.models  # noqa: F401 - ensure models are registered
+    from app import models  # noqa: F401 - ensure models are registered
 
     log.info("Applying database migrations (alembic upgrade head)…")
     await asyncio.to_thread(command.upgrade, _alembic_config(), "head")

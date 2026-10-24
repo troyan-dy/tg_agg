@@ -8,7 +8,9 @@ link, language) live in generate_post and are the same for every tone.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -20,7 +22,7 @@ class Tone:
     temperature: float
 
 
-TONES: dict[str, Tone] = {
+TONES: Mapping[str, Tone] = MappingProxyType({
     "news": Tone(
         key="news",
         label="📰 Новостной",
@@ -81,7 +83,7 @@ TONES: dict[str, Tone] = {
         ),
         temperature=0.4,
     ),
-}
+})
 
 DEFAULT_TONE = "news"
 

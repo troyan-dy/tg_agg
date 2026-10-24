@@ -1,7 +1,7 @@
 """Tests for the bot handlers (called directly, sans aiogram dispatch)."""
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,16 +11,14 @@ from app.bot import handlers
 from app.models import Channel
 from app.pipeline import RunResult
 
+_CHANNEL_DEFAULTS = MappingProxyType({
+    "id": 1, "chat_id": "@chan", "title": "Chan", "rss_url": "https://ex.com/f",
+    "tone": "news", "run_hours": "9,13,18", "enabled": True, "require_media": False,
+})
 
-def _channel(
-    *, id: int = 1, chat_id: str = "@chan", title: str | None = "Chan",
-    rss_url: str | None = "https://ex.com/f", tone: str = "news", run_hours: str = "9,13,18",
-    enabled: bool = True, require_media: bool = False,
-) -> Channel:
-    return Channel(
-        id=id, chat_id=chat_id, title=title, rss_url=rss_url,
-        tone=tone, run_hours=run_hours, enabled=enabled, require_media=require_media,
-    )
+
+def _channel(**overrides: object) -> Channel:
+    return Channel(**{**_CHANNEL_DEFAULTS, **overrides})
 
 
 def _message(text: str | None = None):
@@ -28,7 +26,7 @@ def _message(text: str | None = None):
 
 
 def _kb_texts(kb) -> set[str]:
-    return {b.text for row in kb.keyboard for b in row}
+    return {button.text for row in kb.keyboard for button in row}
 
 
 def _select(monkeypatch, channel: Channel | None):
@@ -174,7 +172,10 @@ async def test_try_add_channel_unresolvable(monkeypatch):
 
 # --- Channels list / select ----------------------------------------------------
 async def test_show_channels_lists(monkeypatch):
-    chans = [_channel(id=1, title="A"), _channel(id=2, title="B")]
+    chans = [
+        _channel(id=1, title="A"),
+        _channel(id=2, title="B"),
+    ]
     monkeypatch.setattr(handlers, "list_channels", AsyncMock(return_value=chans))
     _select(monkeypatch, chans[0])
     msg = _message()
@@ -426,7 +427,7 @@ async def test_btn_editor_done_returns_to_channel(monkeypatch):
 def test_tone_reply_kb_marks_current():
     kb = handlers.tone_reply_kb("expert")
     texts = _kb_texts(kb)
-    assert any(t.startswith("✅") and "Экспертный" in t for t in texts)
+    assert any(label.startswith("✅") and "Экспертный" in label for label in texts)
     assert handlers.BTN_DONE in texts
 
 
