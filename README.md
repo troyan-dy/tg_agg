@@ -231,6 +231,10 @@ make types        # uv run mypy
 make test         # uv run pytest -q (покрытие включено, падает ниже порога)
 ```
 
+В облачных сессиях Claude Code зависимости ставит SessionStart-хук
+([.claude/hooks/session-start.sh](.claude/hooks/session-start.sh), `uv sync --frozen`),
+так что `make check` работает сразу. Локально хук ничего не делает.
+
 ### Подготовка
 
 1. Бот у [@BotFather](https://t.me/BotFather) → `BOT_TOKEN`.
