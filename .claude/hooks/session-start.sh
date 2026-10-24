@@ -18,4 +18,9 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 # Идемпотентно: uv сам скачает Python из .python-version и доустановит только недостающее.
+# Dev-группа включает ruff, mypy, pytest и wemake-python-styleguide (flake8).
 uv sync --frozen
+
+# Быстрая проверка, что линтеры на месте (сам прогон — `make check`).
+uv run --frozen flake8 --version >/dev/null
+uv run --frozen ruff --version >/dev/null

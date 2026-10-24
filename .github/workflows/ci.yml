@@ -30,6 +30,9 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check .
 
+      - name: Style (wemake-python-styleguide)
+        run: uv run flake8 . --select=WPS
+
       - name: Types (mypy)
         run: uv run mypy
 
