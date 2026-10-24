@@ -19,6 +19,7 @@ from app.models import Channel, SeenItem, Setting
 from app.tone import get_preset
 
 SELECTED_KEY = "selected_channel"
+_MAX_HOUR = 23
 
 
 def parse_run_hours(text: str) -> list[int]:
@@ -31,10 +32,10 @@ def parse_run_hours(text: str) -> list[int]:
     for tok in text.replace(" ", "").split(","):
         if not tok:
             continue
-        h = int(tok)  # ValueError on non-numeric tokens
-        if not 0 <= h <= 23:
-            raise ValueError(f"час вне диапазона 0–23: {h}")
-        hours.append(h)
+        hour = int(tok)  # ValueError on non-numeric tokens
+        if not 0 <= hour <= _MAX_HOUR:
+            raise ValueError(f"час вне диапазона 0–23: {hour}")
+        hours.append(hour)
     if not hours:
         raise ValueError("не указан ни один час")
     return sorted(set(hours))
@@ -44,8 +45,8 @@ def parse_run_hours(text: str) -> list[int]:
 async def list_channels() -> list[Channel]:
     """All channels, oldest first (stable order for lists/menus)."""
     async with SessionLocal() as session:
-        result = await session.execute(select(Channel).order_by(Channel.id))
-        return list(result.scalars().all())
+        rows = await session.execute(select(Channel).order_by(Channel.id))
+        return list(rows.scalars().all())
 
 
 async def get_channel(channel_id: int) -> Channel | None:
@@ -55,8 +56,9 @@ async def get_channel(channel_id: int) -> Channel | None:
 
 async def get_channel_by_chat(chat_id: str) -> Channel | None:
     async with SessionLocal() as session:
-        result = await session.execute(select(Channel).where(Channel.chat_id == chat_id))
-        return result.scalar_one_or_none()
+        query = select(Channel).where(Channel.chat_id == chat_id)
+        rows = await session.execute(query)
+        return rows.scalar_one_or_none()
 
 
 async def add_channel(chat_id: str, title: str | None = None) -> Channel:
@@ -64,7 +66,7 @@ async def add_channel(chat_id: str, title: str | None = None) -> Channel:
     channel = Channel(
         chat_id=chat_id,
         title=title,
-        run_hours=",".join(str(h) for h in settings.run_hours_list),
+        run_hours=",".join(str(hour) for hour in settings.run_hours_list),
         tone=get_preset(settings.post_tone).key,
     )
     async with SessionLocal() as session:
@@ -107,18 +109,19 @@ async def get_selected_channel() -> Channel | None:
             if channel:
                 return channel
         # Nothing selected (or it was deleted) — default to the first channel.
-        result = await session.execute(select(Channel).order_by(Channel.id).limit(1))
-        return result.scalar_one_or_none()
+        first = select(Channel).order_by(Channel.id).limit(1)
+        rows = await session.execute(first)
+        return rows.scalar_one_or_none()
 
 
 async def set_selected_channel(channel_id: int) -> None:
-    value = str(channel_id)
+    stored_id = str(channel_id)
     async with SessionLocal() as session:
         setting = await session.get(Setting, SELECTED_KEY)
         if setting:
-            setting.value = value
+            setting.value = stored_id
         else:
-            session.add(Setting(key=SELECTED_KEY, value=value))
+            session.add(Setting(key=SELECTED_KEY, value=stored_id))
         await session.commit()
     log.info("Selected channel set to {}", channel_id)
 
@@ -129,12 +132,12 @@ async def filter_unseen(channel_id: int, entry_ids: list[str]) -> set[str]:
     if not entry_ids:
         return set()
     async with SessionLocal() as session:
-        result = await session.execute(
+        rows = await session.execute(
             select(SeenItem.entry_id).where(
                 SeenItem.channel_id == channel_id, SeenItem.entry_id.in_(entry_ids)
             )
         )
-        known = set(result.scalars().all())
+        known = set(rows.scalars().all())
     return set(entry_ids) - known
 
 
@@ -146,7 +149,7 @@ async def recent_published_titles(channel_id: int, within_hours: int = 24) -> li
     """
     cutoff = datetime.now(UTC) - timedelta(hours=within_hours)
     async with SessionLocal() as session:
-        result = await session.execute(
+        rows = await session.execute(
             select(SeenItem.title)
             .where(
                 SeenItem.channel_id == channel_id,
@@ -155,7 +158,7 @@ async def recent_published_titles(channel_id: int, within_hours: int = 24) -> li
             )
             .order_by(SeenItem.posted_at.desc())
         )
-        return [t for t in result.scalars().all() if t]
+        return [title for title in rows.scalars().all() if title]
 
 
 async def published_among(channel_id: int, entry_ids: list[str]) -> set[str]:
@@ -163,20 +166,20 @@ async def published_among(channel_id: int, entry_ids: list[str]) -> set[str]:
     if not entry_ids:
         return set()
     async with SessionLocal() as session:
-        result = await session.execute(
+        rows = await session.execute(
             select(SeenItem.entry_id).where(
                 SeenItem.channel_id == channel_id,
                 SeenItem.entry_id.in_(entry_ids),
                 SeenItem.published.is_(True),
             )
         )
-        return set(result.scalars().all())
+        return set(rows.scalars().all())
 
 
 async def mark_seen(
-    channel_id: int, items: list[dict], published_id: str | None = None
+    channel_id: int, entries: list[dict], published_id: str | None = None
 ) -> None:
-    """Persist evaluated entries for a channel. `items` are dicts with id/title/link.
+    """Persist evaluated entries for a channel. `entries` are dicts with id/title/link.
 
     The entry equal to `published_id` is flagged as published. Uses an
     idempotent upsert so concurrent runs never raise on duplicates. The
@@ -184,19 +187,19 @@ async def mark_seen(
     an already-seen entry (the fallback path) still records the publication —
     on_conflict_do_nothing alone would leave the old published=False row intact.
     """
-    if not items:
+    if not entries:
         return
     now = datetime.now(UTC)
     rows = [
         {
             "channel_id": channel_id,
-            "entry_id": it["id"],
-            "title": it.get("title"),
-            "link": it.get("link"),
-            "published": it["id"] == published_id,
-            "posted_at": now if it["id"] == published_id else None,
+            "entry_id": entry["id"],
+            "title": entry.get("title"),
+            "link": entry.get("link"),
+            "published": entry["id"] == published_id,
+            "posted_at": now if entry["id"] == published_id else None,
         }
-        for it in items
+        for entry in entries
     ]
     async with SessionLocal() as session:
         stmt = pg_insert(SeenItem).values(rows)

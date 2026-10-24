@@ -12,7 +12,7 @@ def test_registry_keys_match_dataclass_keys():
     for key, preset in tone.TONES.items():
         assert preset.key == key
         assert preset.label and preset.description and preset.fragment
-        assert 0.0 <= preset.temperature <= 1.0
+        assert 0 <= preset.temperature <= 1
 
 
 def test_get_preset_known_key():

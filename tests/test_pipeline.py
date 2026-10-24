@@ -34,20 +34,28 @@ def _channel(
     )
 
 
-def _entries(n: int) -> list[dict]:
-    return [{"id": str(i), "title": f"t{i}", "summary": f"s{i}", "link": f"l{i}"} for i in range(n)]
+def _entries(count: int) -> list[dict]:
+    return [
+        {
+            "id": str(num),
+            "title": f"t{num}",
+            "summary": f"s{num}",
+            "link": f"l{num}",
+        }
+        for num in range(count)
+    ]
 
 
 async def test_no_feed_when_url_missing(bot):
-    result = await pipeline.run_once(bot, _channel(rss_url=None))
-    assert result.status == "no_feed"
+    outcome = await pipeline.run_once(bot, _channel(rss_url=None))
+    assert outcome.status == "no_feed"
     bot.send_message.assert_not_called()
 
 
 async def test_no_new_when_feed_empty(monkeypatch, bot):
     monkeypatch.setattr(pipeline.rss, "fetch_entries", AsyncMock(return_value=[]))
-    result = await pipeline.run_once(bot, _channel())
-    assert result.status == "no_new"
+    outcome = await pipeline.run_once(bot, _channel())
+    assert outcome.status == "no_new"
     bot.send_message.assert_not_called()
 
 
@@ -61,10 +69,10 @@ async def test_all_seen_consults_fallback(monkeypatch, bot):
     pick = AsyncMock()
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
 
-    result = await pipeline.run_once(bot, _channel())
+    outcome = await pipeline.run_once(bot, _channel())
 
     fallback.assert_awaited_once()
-    assert result.status == "no_new"
+    assert outcome.status == "no_new"
     pick.assert_not_called()
     bot.send_message.assert_not_called()
 
@@ -80,10 +88,10 @@ async def test_posted_happy_path(monkeypatch, bot):
     mark = AsyncMock()
     monkeypatch.setattr(pipeline, "mark_seen", mark)
 
-    result = await pipeline.run_once(bot, ch)
+    outcome = await pipeline.run_once(bot, ch)
 
-    assert result.status == "posted"
-    assert result.detail == "t1"  # the picked entry's title
+    assert outcome.status == "posted"
+    assert outcome.detail == "t1"  # the picked entry's title
     bot.send_message.assert_awaited_once_with(
         chat_id=ch.chat_id, text="<b>post</b>", disable_web_page_preview=True
     )
@@ -127,10 +135,10 @@ async def test_falls_back_to_seen_but_unpublished(monkeypatch, bot):
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="p"))
     monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
 
-    result = await pipeline.run_once(bot, _channel())
+    outcome = await pipeline.run_once(bot, _channel())
 
-    assert result.status == "posted"
-    shown = {e["id"] for e in pick.await_args.args[0]}
+    assert outcome.status == "posted"
+    shown = {cand["id"] for cand in pick.await_args.args[0]}
     assert shown == {"1", "2"}
 
 
@@ -142,9 +150,9 @@ async def test_no_new_only_when_all_published(monkeypatch, bot):
     pick = AsyncMock()
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
 
-    result = await pipeline.run_once(bot, _channel())
+    outcome = await pipeline.run_once(bot, _channel())
 
-    assert result.status == "no_new"
+    assert outcome.status == "no_new"
     pick.assert_not_called()
     bot.send_message.assert_not_called()
 
@@ -176,13 +184,13 @@ async def test_publish_failure_marks_rest_but_not_chosen(monkeypatch, bot):
     mark = AsyncMock()
     monkeypatch.setattr(pipeline, "mark_seen", mark)
 
-    result = await pipeline.run_once(bot, _channel())
+    outcome = await pipeline.run_once(bot, _channel())
 
-    assert result.status == "error"
-    assert "telegram down" in result.detail
+    assert outcome.status == "error"
+    assert "telegram down" in outcome.detail
     # The failed (chosen, id="1") entry is NOT marked, so it can be retried.
     marked = mark.await_args.args[1]  # args[0] is the channel id
-    assert {e["id"] for e in marked} == {"0", "2"}
+    assert {cand["id"] for cand in marked} == {"0", "2"}
 
 
 async def test_generate_post_failure_is_caught(monkeypatch, bot):
@@ -196,8 +204,8 @@ async def test_generate_post_failure_is_caught(monkeypatch, bot):
     )
     monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
 
-    result = await pipeline.run_once(bot, _channel())
-    assert result.status == "error"
+    outcome = await pipeline.run_once(bot, _channel())
+    assert outcome.status == "error"
     bot.send_message.assert_not_called()
 
 
@@ -211,9 +219,9 @@ async def test_preview_sends_to_chat_and_skips_persist(monkeypatch, bot):
     mark = AsyncMock()
     monkeypatch.setattr(pipeline, "mark_seen", mark)
 
-    result = await pipeline.run_once(bot, _channel(), chat_id=42, persist=False)
+    outcome = await pipeline.run_once(bot, _channel(), chat_id=42, persist=False)
 
-    assert result.status == "posted"
+    assert outcome.status == "posted"
     # Post goes to the given chat, not the channel...
     bot.send_message.assert_awaited_once_with(
         chat_id=42, text="<b>p</b>", disable_web_page_preview=True
@@ -233,9 +241,9 @@ async def test_preview_publish_failure_skips_persist(monkeypatch, bot):
     mark = AsyncMock()
     monkeypatch.setattr(pipeline, "mark_seen", mark)
 
-    result = await pipeline.run_once(bot, _channel(), chat_id=42, persist=False)
+    outcome = await pipeline.run_once(bot, _channel(), chat_id=42, persist=False)
 
-    assert result.status == "error"
+    assert outcome.status == "error"
     mark.assert_not_called()  # even on failure the preview leaves the DB untouched
 
 
@@ -287,7 +295,7 @@ async def test_publish_multiple_images_sends_media_group(bot):
     kwargs = bot.send_media_group.await_args.kwargs
     assert kwargs["chat_id"] == 7
     group = kwargs["media"]
-    assert [m.media for m in group] == ["https://cdn/a.jpg", "https://cdn/b.jpg"]
+    assert [photo.media for photo in group] == ["https://cdn/a.jpg", "https://cdn/b.jpg"]
     assert group[0].caption == "post"  # caption rides the first item
     assert group[1].caption is None
     bot.send_photo.assert_not_called()
@@ -312,9 +320,9 @@ async def test_posted_with_image_sends_photo(monkeypatch, bot):
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="<b>p</b>"))
     monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
 
-    result = await pipeline.run_once(bot, ch)
+    outcome = await pipeline.run_once(bot, ch)
 
-    assert result.status == "posted"
+    assert outcome.status == "posted"
     bot.send_photo.assert_awaited_once_with(
         chat_id=ch.chat_id, photo="https://cdn/i.jpg", caption="<b>p</b>"
     )
@@ -330,9 +338,9 @@ async def test_require_media_skips_text_only(monkeypatch, bot):
     pick = AsyncMock()
     monkeypatch.setattr(pipeline.deepseek, "pick_most_relevant", pick)
 
-    result = await pipeline.run_once(bot, _channel(require_media=True))
+    outcome = await pipeline.run_once(bot, _channel(require_media=True))
 
-    assert result.status == "no_new"
+    assert outcome.status == "no_new"
     fu.assert_not_called()  # bailed before touching the feed dedup
     pick.assert_not_called()
     bot.send_message.assert_not_called()
@@ -353,12 +361,12 @@ async def test_require_media_keeps_only_media_entries(monkeypatch, bot):
     monkeypatch.setattr(pipeline.deepseek, "generate_post", AsyncMock(return_value="p"))
     monkeypatch.setattr(pipeline, "mark_seen", AsyncMock())
 
-    result = await pipeline.run_once(bot, _channel(require_media=True))
+    outcome = await pipeline.run_once(bot, _channel(require_media=True))
 
-    assert result.status == "posted"
-    assert result.detail == "t1"
+    assert outcome.status == "posted"
+    assert outcome.detail == "t1"
     candidates = pick.await_args.args[0]
-    assert [c["id"] for c in candidates] == ["1"]
+    assert [cand["id"] for cand in candidates] == ["1"]
     bot.send_photo.assert_awaited_once_with(
         chat_id="@chan", photo="https://cdn/i.jpg", caption="p"
     )

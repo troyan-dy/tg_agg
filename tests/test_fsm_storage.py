@@ -58,7 +58,7 @@ async def test_clearing_state_and_data_drops_row(storage):
 
 
 async def test_keys_are_isolated(storage):
-    a = StorageKey(bot_id=1, chat_id=2, user_id=3)
-    b = StorageKey(bot_id=1, chat_id=2, user_id=4)
-    await storage.set_state(a, "AState")
-    assert await storage.get_state(b) is None
+    key_a = StorageKey(bot_id=1, chat_id=2, user_id=3)
+    key_b = StorageKey(bot_id=1, chat_id=2, user_id=4)
+    await storage.set_state(key_a, "AState")
+    assert await storage.get_state(key_b) is None

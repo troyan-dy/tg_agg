@@ -123,8 +123,8 @@ async def test_fetch_entries_normalizes_limits_and_drops_idless(monkeypatch):
 
     monkeypatch.setattr(rss.feedparser, "parse", lambda url: FakeParsed())
 
-    result = await rss.fetch_entries("http://feed", limit=2)
-    assert [e["id"] for e in result] == ["1", "2"]
+    outcome = await rss.fetch_entries("http://feed", limit=2)
+    assert [fetched["id"] for fetched in outcome] == ["1", "2"]
 
 
 async def test_fetch_entries_drops_entries_without_id(monkeypatch):

@@ -32,7 +32,32 @@ def _key(key: StorageKey) -> str:
 
 
 class DBStorage(BaseStorage):
-    """FSM storage that persists state and data in the `settings` table."""
+    """FSM storage that persists state and data in the `settings` table.
+
+    Method names/signatures (set_state, get_data, `data` …) are dictated by
+    aiogram's BaseStorage interface.
+    """
+
+    async def set_state(self, key: StorageKey, state: StateType = None) -> None:
+        payload = await self._load(key)
+        payload["state"] = state.state if isinstance(state, State) else state
+        await self._save(key, payload)
+
+    async def get_state(self, key: StorageKey) -> str | None:
+        return (await self._load(key)).get("state")
+
+    async def set_data(
+        self, key: StorageKey, data: Mapping[str, Any]  # noqa: WPS110 - BaseStorage API
+    ) -> None:
+        payload = await self._load(key)
+        payload["data"] = dict(data)
+        await self._save(key, payload)
+
+    async def get_data(self, key: StorageKey) -> dict[str, Any]:
+        return (await self._load(key)).get("data", {})
+
+    async def close(self) -> None:
+        """Nothing to release: a DB session is opened per call."""
 
     async def _load(self, key: StorageKey) -> dict[str, Any]:
         async with SessionLocal() as session:
@@ -48,28 +73,9 @@ class DBStorage(BaseStorage):
                 await session.commit()
                 return
             row = await session.get(Setting, skey)
-            value = json.dumps(payload)
+            serialized = json.dumps(payload)
             if row:
-                row.value = value
+                row.value = serialized
             else:
-                session.add(Setting(key=skey, value=value))
+                session.add(Setting(key=skey, value=serialized))
             await session.commit()
-
-    async def set_state(self, key: StorageKey, state: StateType = None) -> None:
-        payload = await self._load(key)
-        payload["state"] = state.state if isinstance(state, State) else state
-        await self._save(key, payload)
-
-    async def get_state(self, key: StorageKey) -> str | None:
-        return (await self._load(key)).get("state")
-
-    async def set_data(self, key: StorageKey, data: Mapping[str, Any]) -> None:
-        payload = await self._load(key)
-        payload["data"] = dict(data)
-        await self._save(key, payload)
-
-    async def get_data(self, key: StorageKey) -> dict[str, Any]:
-        return (await self._load(key)).get("data", {})
-
-    async def close(self) -> None:
-        return None

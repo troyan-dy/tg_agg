@@ -36,7 +36,8 @@ class Settings(BaseSettings):
 
     @property
     def run_hours_list(self) -> list[int]:
-        return [int(h.strip()) for h in self.run_hours.split(",") if h.strip()]
+        parts = (part.strip() for part in self.run_hours.split(","))
+        return [int(hour) for hour in parts if hour]
 
 
 settings = Settings()  # type: ignore[call-arg]  # values come from env/.env

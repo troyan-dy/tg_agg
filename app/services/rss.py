@@ -4,12 +4,17 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+from collections.abc import Iterator
+from itertools import chain
 
 import feedparser
 from loguru import logger as log
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _IMG_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.IGNORECASE)
+_TITLE_LIMIT = 300
+# Feed fields that may carry a stable entry id, in priority order.
+_ID_FIELDS = ("id", "guid", "link")
 
 
 def _clean(text: str, limit: int = 400) -> str:
@@ -19,7 +24,10 @@ def _clean(text: str, limit: int = 400) -> str:
 
 
 def _entry_id(entry) -> str:
-    return entry.get("id") or entry.get("guid") or entry.get("link") or entry.get("title", "")
+    for field in _ID_FIELDS:
+        if entry.get(field):
+            return entry[field]
+    return entry.get("title", "")
 
 
 def _is_video(media) -> bool:
@@ -27,6 +35,28 @@ def _is_video(media) -> bool:
         str(media.get("medium", "")).lower() == "video"
         or str(media.get("type", "")).lower().startswith("video")
     )
+
+
+def _media_image_urls(entry) -> Iterator[str | None]:
+    """Image URLs from media_content (non-video), media_thumbnail and enclosures."""
+    for media in entry.get("media_content", []) or []:
+        if not _is_video(media):
+            yield media.get("url")
+    for thumb in entry.get("media_thumbnail", []) or []:
+        yield thumb.get("url")
+    for enc in entry.get("enclosures", []) or []:
+        if str(enc.get("type", "")).startswith("image/"):
+            yield enc.get("href")
+
+
+def _html_image_urls(entry) -> Iterator[str]:
+    """Every <img> src found in the summary/content HTML."""
+    blobs = [entry.get("summary", "")]
+    parts = entry.get("content", []) or []
+    blobs.extend(part.get("value", "") for part in parts)
+    for blob in blobs:
+        for match in _IMG_RE.finditer(blob or ""):
+            yield html.unescape(match.group(1))
 
 
 def _extract_images(entry) -> list[str]:
@@ -37,26 +67,10 @@ def _extract_images(entry) -> list[str]:
     "primary" image (see _extract_image); the full list lets us post galleries.
     """
     urls: list[str] = []
-
-    def add(url: str | None) -> None:
-        url = (url or "").strip()
+    for raw_url in chain(_media_image_urls(entry), _html_image_urls(entry)):
+        url = (raw_url or "").strip()
         if url and url not in urls:
             urls.append(url)
-
-    for media in entry.get("media_content", []) or []:
-        if not _is_video(media):
-            add(media.get("url"))
-    for thumb in entry.get("media_thumbnail", []) or []:
-        add(thumb.get("url"))
-    for enc in entry.get("enclosures", []) or []:
-        if str(enc.get("type", "")).startswith("image/"):
-            add(enc.get("href"))
-    html_blobs = [entry.get("summary", "")]
-    for c in entry.get("content", []) or []:
-        html_blobs.append(c.get("value", ""))
-    for blob in html_blobs:
-        for m in _IMG_RE.finditer(blob or ""):
-            add(html.unescape(m.group(1)))
     return urls
 
 
@@ -69,10 +83,12 @@ def _extract_image(entry) -> str:
 def _extract_video(entry) -> str:
     """Best-effort video URL from media_content/enclosures, else ''."""
     for media in entry.get("media_content", []) or []:
-        if _is_video(media) and media.get("url"):
-            return str(media["url"])
+        video_url = media.get("url")
+        if _is_video(media) and video_url:
+            return str(video_url)
     for enc in entry.get("enclosures", []) or []:
-        if str(enc.get("type", "")).startswith("video/") and enc.get("href"):
+        enc_type = str(enc.get("type", ""))
+        if enc_type.startswith("video/") and enc.get("href"):
             return enc["href"]
     return ""
 
@@ -81,7 +97,7 @@ def _normalize(entry) -> dict:
     images = _extract_images(entry)
     return {
         "id": _entry_id(entry),
-        "title": _clean(entry.get("title", ""), 300),
+        "title": _clean(entry.get("title", ""), _TITLE_LIMIT),
         "summary": _clean(entry.get("summary", "")),
         "link": entry.get("link", ""),
         "image": images[0] if images else "",
@@ -95,8 +111,8 @@ async def fetch_entries(url: str, limit: int = 50) -> list[dict]:
     parsed = await asyncio.to_thread(feedparser.parse, url)
     if getattr(parsed, "bozo", False):
         log.warning("Feed parse issue for {}: {}", url, getattr(parsed, "bozo_exception", None))
-    entries = [_normalize(e) for e in parsed.entries[:limit]]
+    entries = [_normalize(raw) for raw in parsed.entries[:limit]]
     # Drop entries without a usable id.
-    result = [e for e in entries if e["id"]]
-    log.info("Fetched {} entries ({} usable) from {}", len(parsed.entries), len(result), url)
-    return result
+    usable = [entry for entry in entries if entry["id"]]
+    log.info("Fetched {} entries ({} usable) from {}", len(parsed.entries), len(usable), url)
+    return usable
